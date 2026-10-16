@@ -12,14 +12,14 @@ Per slot:
 | packets / bytes sent | every packet sent (forwarded or our own), bytes as on air |
 | RX / TX airtime | whole percent of the slot, rounded to nearest. TX is measured; RX is estimated from decoded packets, so it's a lower bound on how busy the channel is |
 | noise floor | median of the slot's RSSI readings (one every 5 s while the radio is listening), dBm. Packets are short, so it follows the background noise. It shifts if the RX gain or frequency changes |
-| firewall drops | floods the firewall dropped (none while `fw.enabled` is 0) |
+| firewall drops | packets the firewall dropped (none while `fw.enabled` is 0) |
 | RX errors | packets the radio heard but couldn't read, eg. CRC failures from collisions or interference |
-| flood dups | floods heard again after they were already seen: how many other repeaters around here pass the same traffic |
+| flood dups | flood-routed packets heard again after they were already seen: how many other repeaters around here pass the same traffic |
 | send queue peak | the most packets waiting to be sent at once (the pool holds 32) |
 | deferred | sends put off because the channel was busy (a packet coming in, or `int.thresh` exceeded), one per retry (every 120-360 ms) |
 | forced | sends forced out after the channel stayed busy for 4 s |
 | holds | times sending was held back because the airtime budget (`set dutycycle`) was used up, one per hold until the next send |
-| looped | floods dropped by loop detection (`loop.detect`) |
+| looped | packets dropped by loop detection (`loop.detect`) |
 
 Counts stop at 65535 per slot (255 for looped and the send queue) instead of wrapping, so the maximum means "at least"; totals over several slots are then minimums too. RX errors and flood dups come from running totals that `clear stats` resets: a slot it happens in only counts from the reset.
 
@@ -70,7 +70,7 @@ Replies are cut off at 160 characters; only extreme 24 h totals could reach that
 | `dfr` | sends deferred |
 | `frc` | sends forced |
 | `hld` | duty cycle holds |
-| `lp` | looped floods dropped |
+| `lp` | looped packets dropped |
 
 ## Files
 

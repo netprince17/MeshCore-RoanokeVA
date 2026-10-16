@@ -236,7 +236,7 @@ public:
   }
 
   // CLI 'hoppol'. Replies, except show pages, can be pasted back as commands.
-  //   hoppol                 entries with a limit, eg. "flood:8 adv:6"
+  //   hoppol                 entries with a limit, eg. "txt:12 path:12"
   //   hoppol <words>         name:max sets a limit (0-64, '-' none), name shows one, show<p> a page of
   //                          HOP_POLICY_PAGE_ENTRIES ("OK", then "entry name match_count" lines).
   //                          All or nothing. Replies the shown values, or "OK".

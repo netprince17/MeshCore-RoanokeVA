@@ -63,7 +63,7 @@ static const char* const FIREWALL_DEFAULT_RULES[] = {
   // check for blocked routes first
   "nm:routepol                        tl:routepol                   ac:drop",
 
-  // drop floods over the hop policy's limits
+  // drop packets over the hop policy's limits
   "nm:hoppol                          tl:hoppol                     ac:drop",
 
   // track and restrict advertisements
@@ -108,7 +108,7 @@ struct FirewallRule {
   uint8_t  limit_burst;            // packets allowed in a row: per sender, channel or slot (lb)
   uint8_t  limit_slot;             // PacketTracking slot (ls), for tl:pkttrk
   uint32_t limit_recovery;         // seconds per packet earned back after the burst, 1 or more
-  uint16_t region_id;              // RegionEntry::id the packet must be in, 0 = '*' (un-scoped flood)
+  uint16_t region_id;              // RegionEntry::id the packet must be in, 0 = '*' (un-scoped flood packets)
 
   // rule action
   uint8_t  action;                 // FIREWALL_ACTION_DROP or FIREWALL_ACTION_FORWARD
@@ -277,7 +277,7 @@ public:
       // channel hash check: the packet must be a channel message on the rule's channel
       if ((r->param_set & FIREWALL_HAS_CHANNEL_HASH) && (!is_channel || packet->payload[0] != r->channel_hash)) continue;
 
-      // region check: the packet must be in the rule's region, or for 0 ('*') be an un-scoped flood
+      // region check: the packet must be in the rule's region, or for 0 ('*') be an un-scoped flood packet
       if (r->param_set & FIREWALL_HAS_REGION) {
         if (r->region_id == 0) {
           if (packet->getRouteType() != ROUTE_TYPE_FLOOD) continue;      // '*': un-scoped floods only
@@ -690,7 +690,7 @@ public:
 
     } else if (strcmp(command, "clear") == 0) {
       clear();
-      strcpy(reply, "OK - all rules cleared, no flood is forwarded");
+      strcpy(reply, "OK - all rules cleared, no flood-routed packets are forwarded");
 
     } else if (isCommand(command, "insert") || isCommand(command, "collapse")) {
       bool insert = command[0] == 'i';

@@ -1,6 +1,8 @@
 # Repeater Firewall
 
-The simple repeater checks every received **flood** packet against a table of firewall rules to decide whether to forward it. Packets addressed to the repeater itself, its own packets, and direct-routed packets aren't affected. The checks run after upstream's own flood checks (`flood.max`, `flood.max.unscoped`, `flood.max.advert`, regions).
+This is a basic firewall with pre-defined lookup tables for tracking purposes.  Tracking is based on the [generic cell rate algorithm](https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm) in order to minimize memory usage.  
+
+By default, instead of blocking adverts at a certain number of hops, this firewall tracks up to 2048 advert senders, allowing distant senders only 1 advert every 3 days.
 
 Three tables work together, each with its own CLI command:
 
@@ -10,31 +12,31 @@ Three tables work together, each with its own CLI command:
 | Route policy | `routepol` | up to 32 repeater routes, for rules with `tl:routepol` |
 | Hop policy | `hoppol` | hop limits per path hash width and packet type, for rules with `tl:hoppol` |
 
-All three load from flash at boot, or their built-in defaults if nothing is saved. Limits (`tl:sendtrk`, `chantrk`, `pkttrk`) also use tracking tables, which are in RAM only, with no CLI.
+All three load from flash at boot, or their built-in defaults if nothing is saved. Tracking tables (`tl:sendtrk`, `chantrk`, `pkttrk`) are in RAM only.
 
-`set fw.enabled 0` turns the firewall off (every flood that passes upstream's checks is forwarded, nothing is counted), `set fw.enabled 1` back on (the default); `get fw.enabled` shows it. It's saved with the repeater settings, not the rules.
+`set fw.enabled 0` turns the firewall off and disables its counters, `set fw.enabled 1` turns it back on (the default), and  `get fw.enabled` shows the current state. 
 
 ## Firewall rules
 
-Rules are checked from slot 0 to 31, skipping empty slots. A rule applies when every field it sets matches the packet. The first rule that applies decides, and **a packet no rule decides is dropped**, so the rules should end with catch-alls such as `rt:flood ac:fwd`.
+Rules are checked from slot 0 to 31, skipping empty slots. A rule applies when every configured check matches the packet. The first rule that matches takes action on the packet, and no further rules are checked.  If no rules match, the packet is dropped, so be sure to use a catch-all 'fwd' as the last rule.
 
 | Key | Field | Value |
 |---|---|---|
 | `nm` | name | up to 8 characters |
-| `pt` | packet type | `req resp txt ack adv grptxt grpdata anonreq path trace multi ctrl raw`, or 0-15 |
+| `pt` | payload type | `req resp txt ack adv grptxt grpdata anonreq path trace multi ctrl raw`, or 0-15 |
 | `hp` | hop count (repeaters already passed) | `N` exactly, `<N` less than, `>N` more than |
-| `rb` | path hash width | 1-3 bytes |
+| `rb` | route path hash width | 1-3 bytes |
 | `rt` | route type | `flood` (unscoped), `tflood` (scoped), `direct`, `tdirect` |
 | `ch` | channel hash | hex, eg. `5e`: channel messages (`grptxt`, `grpdata`) on that channel only |
 | `rg` | region | region name (that exact region, no parents or children), or `*` for unscoped |
-| `tl` | table lookup | one table the packet must match: `routepol`, `hoppol`, `sendtrk` (sender over `lb`/`lr`), `chantrk` (channel over `lb`/`lr`) or `pkttrk` (slot `ls` over `lb`/`lr`) |
-| `lb` `lr` | limit, with `tl:sendtrk` / `chantrk` / `pkttrk` | `lb` packets in a row, then 1 more every `lr` (minutes, or `30s` / `5m` / `4h` / `2d`) |
-| `ls` | limit slot, with `tl:pkttrk` (required) | 0-15 |
+| `tl` | table lookup | check the table to see if the packet matches: `routepol`, `hoppol`, `sendtrk`, `chantrk` or `pkttrk` |
+| `lb` `lr` | limit burst and limit recover | used with the sendtrk, chantrk, and pkttrk tables. `lb` packets allowed in a burst, then 1 more every `lr` time-span, until the burst is fully recovered (minutes, or `30s` / `5m` / `4h` / `2d`). |
+| `ls` | limit slot | used with the `tl:pkttrk` table (required). 0-15 |
 | `ac` | action | `fwd` or `drop` (required for a new rule) |
 
-Limits are a running allowance: a quiet sender, channel or slot can send `lb` in a row, then earns 1 back every `lr`.
+Limits are a running allowance: a quiet sender, channel or slot can send in a burst `lb` packets in a row, then recovers 1 packet every `lr` span of time.
 
-- `tl:sendtrk`: adverts and anon requests, per sender (by public key; anon request keys can't be verified), in whole minutes
+- `tl:sendtrk`: adverts and anon requests, per sender (by public key), in whole minutes
 - `tl:chantrk`: channel messages (`grptxt`, `grpdata`), per channel (all 256 channel hashes), in seconds
 - `tl:pkttrk`: any packet the rule matches, counted together in slot `ls` (16 slots), in seconds. Rules using the same slot share its allowance, eg. a total cap on distant channel messages.
 
@@ -42,28 +44,29 @@ A tracking table **matches a packet over its allowance**, so the rule acts on it
 
 ### How rules share an allowance
 
-Each sender, channel or slot has one clock, shared by every limit rule that uses it. A packet within a rule's allowance pushes the clock forward by the rule's `lr`, and time brings it back. A packet is over a rule's allowance if that push would put the clock more than the rule's window (`lb` x `lr`) ahead of now: the rule matches (and the clock isn't moved).
+Refer to the [generic cell rate algorithm](https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm) for background.
 
-**Each packet should be counted by one rule per clock:** give limit rules for the same packets non-overlapping matches, eg. `hp:<7` and `hp:>6`. Otherwise a packet within one rule's allowance goes on and is counted again by the next. Rules on different clocks (eg. a channel's and a slot's) can both count it.
+Each sender, channel or slot updates a clock each time it sends a packet. A packet within a rule's allowance pushes the clock forward by the rule's `lr`. A packet is over a rule's allowance if that push would put the clock more than the rule's window (`lb` x `lr`) ahead of now.  As time passes, all saved clocks slowly move back into the rule's window and one or more packets are allowed to be sent again.
+
+**Each packet should be counted by one rule per clock:** give limit rules for the same packets non-overlapping matches, eg. `hp:<7` and `hp:>6`. Otherwise a packet within one rule's allowance is counted again by the next rule's allowance.
 
 **Window limit:** for `tl:sendtrk`, `lb` x `lr` must be at most **32,767 minutes (about 22.75 days)**, eg. `lb:3 lr:7d` (21 days) is fine, `lb:6 lr:7d` (42 days) is too long. The error gives the longest `lr` for that `lb`, eg. `lr too long, for lb:6 the longest is lr:5461` (minutes). `chantrk` and `pkttrk` have no window limit.
 
-A rule can never push the clock further ahead than its own window, so what's left of a bigger window stays available to the rules that have it. Use this to give one group priority, with the bigger window. Example, channel messages, local (6 repeaters or fewer) and distant:
+A rule can never push the clock further ahead than its own window.  This can be used to give certain rules priority over other rules.  For example, local channel messages vs distant channel messages:
 
 ```
-nm:chanlm1 hp:<7 tl:chantrk lb:10 lr:30s ac:drop   local:   window 300 s, then 2 a minute
-nm:chanlm2 hp:>6 tl:chantrk lb:6  lr:30s ac:drop   distant: window 180 s, then 2 a minute
+nm:chanlm1 hp:<7 tl:chantrk lb:10 lr:30s ac:drop   # local:   window 300 s, then 2 a minute
+nm:chanlm2 hp:>6 tl:chantrk lb:6  lr:30s ac:drop   # distant: window 180 s, then 2 a minute
 ```
 
-A distant flood can only push the channel's clock about 180 s ahead, so local users keep the rest of their 300 s window (~4 messages) and their 2 a minute. If the windows were equal, a distant flood could use up the whole allowance and block local users too. Keep the lower-priority window clearly smaller.
+Distant packets can only push the channel's clock about 180 s ahead, so local users keep the rest of their 300 s window (~4 messages) and their 2 a minute. If the windows were equal, distant packets could use up the whole allowance and block local users too. Keep the lower-priority window clearly smaller.
 
-A total cap (`pkttrk`) should earn back faster than one channel does (a shorter `lr`), so one busy channel can't use it all up.
 
 ### Default rules
 
 ```
- 0 nm:routepol                  tl:routepol                   ac:drop   floods on listed routes
- 1 nm:hoppol                    tl:hoppol                     ac:drop   floods over a hop limit
+ 0 nm:routepol                  tl:routepol                   ac:drop   packets on listed routes
+ 1 nm:hoppol                    tl:hoppol                     ac:drop   packets over a hop limit
  2 nm:advlm1   pt:adv     hp:<7 tl:sendtrk      lb:3  lr:4h   ac:drop   nearby adverts over 3, then 1 per 4 hours
  3 nm:advlm2   pt:adv     hp:>6 tl:sendtrk      lb:1  lr:3d   ac:drop   other adverts over 1 per 3 days
  4 nm:anrqlm1  pt:anonreq hp:<7 tl:sendtrk      lb:6  lr:12h  ac:drop   nearby anon requests over 6, then 1 per 12 hours
@@ -78,21 +81,99 @@ A total cap (`pkttrk`) should earn back faster than one channel does (a shorter 
 12 nm:acpttfld rt:tflood                                      ac:fwd
 ```
 
-## Route policy
+## Route policy table
 
-Each entry is a route of 1-4 repeater hashes (1-3 bytes each) that must appear back to back, in order, in the packet's path, at a position:
+`tl:routepol`
 
-- `ps:start`: the first hops, near the sender (can be faked by the sender)
-- `ps:end`: the last hops, the repeaters it reached us through
-- `ps:any`: anywhere
+This table can be used to block certain senders or paths.  For example, someone flooding the network with requests could be blocked by adding the first few hops of their path.
 
-An entry hash matches a path hash it is the start of (`9e` matches `9e` and `9e12`). Each route can have an 8-character name (`nm`). Example: `routepol 0 nm:north rh:9e,4c ps:end`.
+Each entry is a route of 1-4 hashes (1-3 bytes each) that must appear back to back, in order, in the packet's path:
 
-## Hop policy
+| Key | Field | Value |
+|---|---|---|
+| `nm` | name | for reference, up to 8 characters, eg. `nm:reqfld1` |
+| `rh` | route hashes | the hashes that make up the route: 1-4, comma separated, each 2, 4 or 6 hex digits (all the same length), eg. `rh:9e,4c` |
+| `ps` | position | where the route must be in the path: `ps:start`, `ps:end`, or `ps:any` (the default) |
 
-A fixed list of entries, each with a hop limit or none: `direct tdirect rb1 rb2 rb3` and the packet types (`req resp txt ack grptxt grpdata anonreq path trace multi ctrl pt12 pt13 pt14 raw`). A packet matches if it has passed more repeaters than any limit that applies to it. Example: `hoppol txt:12 path:12`. Limits for all floods, unscoped floods and adverts are upstream's `flood.max`, `flood.max.unscoped` and `flood.max.advert`.
+An entry hash matches a path hash it is the start of (`9e` matches `9e` and `9e12`).
 
-Direct messages and remote management flood `txt`, `path`, `ack`, `anonreq`, `req` and `resp` until a direct path is known, so limits on these limit how far apart people can message or manage repeaters.
+Example: `routepol 0 nm:reqfld1 rh:9e,4c ps:end`.
+
+## Hop policy table
+
+`tl:hoppol`
+
+This table limits how far certain kinds of packets travel, by route type, path hash width or payload type. For example, `txt:12` matches direct text messages that have already passed more than 12 repeaters.
+
+The table is a fixed list of 20 entries, each with a hop limit (0-64) or none (`-`). Each matches packets with one property:
+
+| Entry | Matches |
+|---|---|
+| `direct` | direct-routed packets, unscoped. The firewall only checks flood-routed packets, so this doesn't match yet |
+| `tdirect` | direct-routed packets, scoped. Doesn't match yet, as `direct` |
+| `rb1` | packets whose path uses 1-byte repeater hashes |
+| `rb2` | packets whose path uses 2-byte repeater hashes |
+| `rb3` | packets whose path uses 3-byte repeater hashes |
+| `req` | requests: remote management and stats, logged in |
+| `resp` | responses to requests |
+| `txt` | direct text messages (DMs) |
+| `ack` | acknowledgements of DMs |
+| `grptxt` | channel text messages |
+| `grpdata` | channel data |
+| `anonreq` | anonymous requests: logins and requests from unknown nodes |
+| `path` | path returns, which set up a direct route |
+| `trace` | trace packets (currently sent direct only, so rarely flood-routed) |
+| `multi` | multipart packets (currently sent direct only, so rarely flood-routed) |
+| `ctrl` | control packets, eg. neighbour discovery |
+| `pt12` | payload type 12, not used by MeshCore yet |
+| `pt13` | payload type 13, not used by MeshCore yet |
+| `pt14` | payload type 14, not used by MeshCore yet |
+| `raw` | raw custom packets (payload type 15) |
+
+A packet is checked against every entry that applies to it (its path hash width and its payload type), and matches if it has passed more repeaters than any of those limits. Eg. with `txt:12` and `rb1:8`, a DM with 1-byte hashes is stopped after 8 repeaters.
+
+Adverts aren't in the list: their hop limit is upstream's `flood.max.advert` (and the sender tracking table limits them). Limits for all floods and unscoped floods are upstream's `flood.max` and `flood.max.unscoped`.
+
+Defaults: `req:6 resp:6 txt:12 ack:12 grpdata:6 anonreq:12 path:12 trace:6 multi:6 ctrl:1 raw:6`, the rest none.
+
+Example: `hoppol txt:12 path:12`.
+
+## Sender tracking table
+
+`tl:sendtrk`
+
+This table limits how often each sender's adverts and anon requests are forwarded. For example, a node re-advertising every few minutes only gets through a few times, then once every few hours.
+
+Up to 2048 senders are tracked, by public key. Each has two clocks, in whole minutes:
+
+| Clock | Used by |
+|---|---|
+| advert | rules with `pt:adv` |
+| anon request | rules with `pt:anonreq` |
+
+The rule sets the limit: `lb` in a row, then 1 more every `lr`, with `lb` x `lr` at most 32,767 minutes. When all 2048 are tracked, a new sender replaces the one closest to fully recovered. `fw senders` shows how many are tracked.
+
+Example: `fw 2 nm:advlm1 pt:adv hp:<7 tl:sendtrk lb:3 lr:4h ac:drop`.
+
+## Channel tracking table
+
+`tl:chantrk`
+
+This table limits channel messages per channel. For example, one busy or spammed channel can't fill the mesh, while the other channels carry on normally.
+
+There's a clock for each of the 256 channel hashes, in seconds. Only channel messages (`grptxt`, `grpdata`) are tracked, and channels sharing a hash share an allowance.
+
+Example: `fw 8 nm:chanlm2 hp:>6 tl:chantrk lb:6 lr:15s ac:drop`.
+
+## Packet tracking table
+
+`tl:pkttrk`
+
+This table puts one shared limit on whatever the rule matches. For example, it can cap all distant channel messages together, which also catches spam spread over many channel hashes.
+
+There are 16 numbered slots (`ls:0` to `ls:15`), each a clock in seconds. Rules using the same slot share its allowance.
+
+Example: `fw 9 nm:chanfld1 pt:grptxt hp:>6 tl:pkttrk ls:0 lb:10 lr:6s ac:drop`.
 
 ## CLI
 

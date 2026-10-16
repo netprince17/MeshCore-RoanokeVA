@@ -13,14 +13,14 @@
 //               busy the channel is, TX is measured.
 //   noisefloor: the median of the slot's RSSI readings (dBm), taken while the radio is listening. Packets are
 //               short, so it follows the background noise. Readings shift if the RX gain or frequency changes.
-//   firewall:   floods the firewall dropped.
+//   firewall:   packets the firewall dropped.
 //   rx errors:  packets the radio heard but couldn't read (eg. CRC failures), from its running total.
-//   flood dups: floods heard again after they were already seen, from the packet tables' running total.
+//   flood dups: flood-routed packets heard again after they were already seen, from the packet tables' running total.
 //   send queue: the most packets waiting to be sent at once.
 //   tx waits:   sends put off because the channel was busy (one per retry), sends forced after it stayed busy
 //               too long, and holds: times sending was held back because the airtime budget (duty cycle) was
 //               used up (one per hold, until the next send). From Dispatcher::checkSend().
-//   looped:     floods dropped by loop detection.
+//   looped:     packets dropped by loop detection.
 //               Counts stop at their field's maximum (65535, or 255 for looped and the send queue) instead of
 //               wrapping, so the maximum means "at least".
 
@@ -45,7 +45,7 @@ struct StatsHistorySlot {
   uint16_t tx_packets;          // packets sent
   uint16_t rx_bytes;            // their bytes on air
   uint16_t tx_bytes;
-  uint16_t fw_drops;            // floods the firewall dropped
+  uint16_t fw_drops;            // packets the firewall dropped
   uint16_t rx_errors;           // packets heard but not readable
   uint16_t flood_dups;          // floods heard again
   uint16_t tx_deferred;         // sends put off, channel busy (one per retry)
@@ -55,7 +55,7 @@ struct StatsHistorySlot {
   uint8_t  airtime_tx_percent;  // TX airtime %
   int8_t   noisefloor_dbm;      // median RSSI (dBm), or STATS_HISTORY_NOISEFLOOR_NONE
   uint8_t  send_queue_peak;     // most packets waiting to be sent
-  uint8_t  looped;              // floods dropped by loop detection
+  uint8_t  looped;              // packets dropped by loop detection
 };
 static_assert(sizeof(StatsHistorySlot) == 26, "stats history slot must stay 26 bytes (25 + 1 padding)");
 
@@ -83,7 +83,7 @@ class StatsHistory {
   uint32_t _tx_deferred_now, _tx_forced_now;            // its tx waits so far
   uint32_t _tx_budget_holds_now;
   bool _tx_budget_held;                                 // sending is held back now (counted once, until a send)
-  uint32_t _looped_now;                                 // its looped floods so far
+  uint32_t _looped_now;                                 // its looped packets so far
   int8_t _noisefloor_samples[STATS_HISTORY_NOISEFLOOR_SAMPLES];   // its noise floor readings so far
   int _noisefloor_sample_count;
   uint64_t _next_noisefloor_sample_millis;              // uptime when the next noise floor reading is due
@@ -133,7 +133,7 @@ public:
     _fw_drops_now = 0;
     _send_queue_peak_now = 0;
 
-    // tx waits and looped floods: the slot's counts
+    // tx waits and looped packets: the slot's counts
     slot.tx_deferred = capped(_tx_deferred_now, STATS_HISTORY_COUNT_MAX);
     slot.tx_forced = capped(_tx_forced_now, STATS_HISTORY_COUNT_MAX);
     slot.tx_budget_holds = capped(_tx_budget_holds_now, STATS_HISTORY_COUNT_MAX);
@@ -158,7 +158,7 @@ public:
     _tx_bytes_now += bytes;
   }
 
-  // From MyMesh::allowPacketForward(): counts a flood the firewall dropped
+  // From MyMesh::allowPacketForward(): counts a packet the firewall dropped
   void countFirewallDrop() {
     if (_next_slot_millis != 0) _fw_drops_now++;
   }
@@ -170,7 +170,7 @@ public:
   }
 
   // From MyMesh::logTxDeferred() / logTxForced() / logTxBudgetHold() / allowPacketForward(): counts a send put off
-  // (channel busy), a send forced (busy too long), a budget hold (once, until the next send), or a flood dropped
+  // (channel busy), a send forced (busy too long), a budget hold (once, until the next send), or a packet dropped
   // by loop detection, in the slot being measured
   void countTxDeferred() {
     if (_next_slot_millis != 0) _tx_deferred_now++;
