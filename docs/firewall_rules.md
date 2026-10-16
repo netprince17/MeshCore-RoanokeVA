@@ -1,8 +1,10 @@
 # Repeater Firewall
 
-This is a basic firewall with pre-defined lookup tables for tracking purposes.  Tracking is based on the [generic cell rate algorithm](https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm) in order to minimize memory usage.  
+This is a basic firewall designed to prioritize messaging over unnecessary background packets.  
 
-By default, instead of blocking adverts at a certain number of hops, this firewall tracks up to 2048 advert senders, allowing distant senders only 1 advert every 3 days.
+The firewall uses pre-defined lookup tables for tracking purposes.  Tracking is based on the [generic cell rate algorithm](https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm) in order to minimize memory usage.  
+
+For example, instead of blocking adverts at a certain number of hops, this firewall tracks up to 2048 advert senders, allowing distant senders only 1 advert every 3 days.
 
 Three tables work together, each with its own CLI command:
 
@@ -12,7 +14,7 @@ Three tables work together, each with its own CLI command:
 | Route policy | `routepol` | up to 32 repeater routes, for rules with `tl:routepol` |
 | Hop policy | `hoppol` | hop limits per path hash width and packet type, for rules with `tl:hoppol` |
 
-All three load from flash at boot, or their built-in defaults if nothing is saved. Tracking tables (`tl:sendtrk`, `chantrk`, `pkttrk`) are in RAM only.
+All three tables load from flash at boot, or their built-in defaults if nothing is saved. Tracking tables (`tl:sendtrk`, `chantrk`, `pkttrk`) are in RAM only.
 
 `set fw.enabled 0` turns the firewall off and disables its counters, `set fw.enabled 1` turns it back on (the default), and  `get fw.enabled` shows the current state. 
 
