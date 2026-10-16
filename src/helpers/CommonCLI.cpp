@@ -604,6 +604,19 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       savePrefs();
       strcpy(reply, "OK");
     }
+  } else if (memcmp(config, "fw.enabled ", 11) == 0) {
+    const char* v = &config[11];
+    if (strcmp(v, "1") == 0 || strcmp(v, "on") == 0) {
+      _prefs->firewall_enabled = 1;
+      savePrefs();
+      strcpy(reply, "OK - firewall is now ON");
+    } else if (strcmp(v, "0") == 0 || strcmp(v, "off") == 0) {
+      _prefs->firewall_enabled = 0;
+      savePrefs();
+      strcpy(reply, "OK - firewall is now OFF");
+    } else {
+      strcpy(reply, "Err - use 0 or 1");
+    }
   } else if (sender_timestamp == 0 && memcmp(config, "freq ", 5) == 0) {
     _prefs->freq = atof(&config[5]);
     savePrefs();
@@ -747,6 +760,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "> strict");
     }
+  } else if (memcmp(config, "fw.enabled", 10) == 0) {
+    sprintf(reply, "> %d", _prefs->firewall_enabled);
   } else if (memcmp(config, "public.key", 10) == 0) {
     strcpy(reply, "> ");
     mesh::Utils::toHex(&reply[2], _callbacks->getSelfId().pub_key, PUB_KEY_SIZE);

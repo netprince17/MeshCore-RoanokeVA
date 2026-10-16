@@ -134,6 +134,13 @@ void loop() {
   }
   while (Serial.available() && len < sizeof(command)-1) {
     char c = Serial.read();
+    if (c == '\b' || c == 0x7F) {   // backspace / delete: remove the last character
+      if (len > 0) {
+        command[--len] = 0;
+        Serial.print("\b \b");      // and erase it on the terminal
+      }
+      continue;
+    }
     if (c != '\n') {
       command[len++] = c;
       command[len] = 0;

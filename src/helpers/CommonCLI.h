@@ -72,6 +72,7 @@ public:
   uint8_t loop_detect = 0;
   uint8_t cad_enabled = 0;      // hardware Channel Activity Detection before TX (boolean)
   uint8_t extra_sf[4];
+  uint8_t firewall_enabled = 0; // repeater flood firewall (boolean; the repeater sets the default)
 
 private:
   class RadioPrefs : public CommonRadioPrefs {
@@ -186,6 +187,7 @@ private:
       def("f_max_uns", _parent->flood_max_unscoped);
       def("f_max_adv", _parent->flood_max_advert);
       def("loop", _parent->loop_detect);
+      def("fw_en", _parent->firewall_enabled);
     }
   public:
     RepeatPrefs(NodePrefs* parent) : _parent(parent) { }

@@ -36,9 +36,15 @@
 #include <helpers/RegionMap.h>
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
+#include "FirewallTable.h"
+#include "StatsHistory.h"
 
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
+#endif
+
+#ifndef DEFAULT_REGION_DEF   // 'region def' line run at boot when there are no regions besides '*', "" = none
+  #define DEFAULT_REGION_DEF  "us us-south|us us-east us-southeast us-va us-va-sw"
 #endif
 
 struct RepeaterStats {
@@ -96,6 +102,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   RegionEntry* recv_pkt_region;
   TransportKey default_scope;
   RateLimiter discover_limiter, anon_limiter;
+  FirewallTable firewall;         // rules deciding which received packets are forwarded
+#if !defined(STM32_PLATFORM)
+  StatsHistory stats_history;     // repeater stats, 5-minute slots for 24 hours (RAM only)
+#endif
   uint32_t pending_discover_tag;
   unsigned long pending_discover_until;
   bool region_load_active;
@@ -139,6 +149,11 @@ protected:
   void logRx(mesh::Packet* pkt, int len, float score) override;
   void logTx(mesh::Packet* pkt, int len) override;
   void logTxFail(mesh::Packet* pkt, int len) override;
+#if !defined(STM32_PLATFORM)
+  void logTxDeferred() override { stats_history.countTxDeferred(); }
+  void logTxForced() override { stats_history.countTxForced(); }
+  void logTxBudgetHold() override { stats_history.countTxBudgetHold(); }
+#endif
   int calcRxDelay(float score, uint32_t air_time) const override;
 
   uint32_t getRetransmitDelay(const mesh::Packet* packet) override;
