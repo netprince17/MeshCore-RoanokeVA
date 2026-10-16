@@ -1,6 +1,6 @@
 # Repeater Stats History
 
-The simple repeater keeps a history of its radio stats: one reading per 5-minute slot, for the last 24 hours (288 slots). It's in RAM only, so it starts empty at every boot, and the first slot is filled 5 minutes after boot. `clear stats` doesn't touch it. It isn't built for STM32 boards (STM32WL, 64 KB RAM).
+The repeater keeps a history of its radio stats: one reading per 5-minute slot, for the last 24 hours (288 slots). It's in RAM only, so it starts empty at every boot, and the first slot is filled 5 minutes after boot. It isn't built for STM32 boards (STM32WL, 64 KB RAM).
 
 ## What's recorded
 
@@ -21,13 +21,13 @@ Per slot:
 | holds | times sending was held back because the airtime budget (`set dutycycle`) was used up, one per hold until the next send |
 | looped | packets dropped by loop detection (`loop.detect`) |
 
-Counts stop at 65535 per slot (255 for looped and the send queue) instead of wrapping, so the maximum means "at least"; totals over several slots are then minimums too. RX errors and flood dups come from running totals that `clear stats` resets: a slot it happens in only counts from the reset.
+Counts top out at 65535 per slot (255 for looped and the send queue). 
 
 ## CLI
 
-Works on the serial console and remotely; every reply fits one message. Only completed slots are shown: the newest is the last full 5 minutes, so it can be up to 10 minutes old.
+Works on the serial console and remotely; every reply fits one message. Only completed slots are available, and the newest slot is always the first 5 minutes.
 
-**`stats`**: a summary. Airtime and noise floor for the last 5 min / 15 min / 60 min / 24 h (each the average of those slots, or of the slots there are so far; `-` if no slot had a noise reading), and the 24 h totals of packets / bytes in and out and firewall drops:
+**`stats`**: display a summary. Airtime and noise floor for the last 5 min / 15 min / 60 min / 24 h (each the average of those slots, or of the slots there are so far; `-` if no slot had a noise reading), and the 24 h totals of packets / bytes in and out and firewall drops:
 
 ```
 air_rx: 3%/2%/2%/1%
