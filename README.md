@@ -4,8 +4,8 @@ This is a build of [MeshCore](https://github.com/meshcore-dev/MeshCore) for the 
 
 ## What's different from stock MeshCore
 
-- **Pre-configured for the area:** the US/Canada LoRa preset (910.525 MHz, BW 62.5, SF 7, CR 8), and our regions: `us`, `us-south`, `us-east`, `us-southeast`, `us-va` and `us-va-sw`. The regions are added at boot-up whenever none are already installed.
-- **Flood firewall:** a very basic firewall similar to iptables, with defaults configured to optimize communications for messaging, and reduce background noise such as distant repeater logins and group data packets. Manage it with `fw`, `routepol` and `hoppol`, or turn it off with `set fw.enabled 0`. See [docs/firewall_rules.md](docs/firewall_rules.md).
+- **Pre-configured for our area:** the US/Canada LoRa preset (910.525 MHz, BW 62.5, SF 7, CR 8), and our regions: `us`, `us-south`, `us-east`, `us-southeast`, `us-va` and `us-va-sw`. The regions are added at boot-up whenever none are already installed.  The local region is not installed by default, it can still be added if necessary.
+- **Flood firewall:** a very basic firewall similar to iptables, with defaults configured to optimize communications for messaging, and reduce background noise such as distant repeater logins and group data packets. Manage it with `fw`, `routepol` and `hoppol`. See [docs/firewall_rules.md](docs/firewall_rules.md).
 - **Stats history:** airtime, noise floor, packets/bytes counters, firewall drops, send queue, busy-channel waits and more, every 5 minutes for the last 24 hours. Use `stats`. See [docs/stats_history.md](docs/stats_history.md).
 - **Serial console:** backspace works properly with terminal apps such as putty.
 
