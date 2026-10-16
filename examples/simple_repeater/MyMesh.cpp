@@ -452,8 +452,21 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
     }
     if (isLooped(packet, maximums)) {
       MESH_DEBUG_PRINTLN("allowPacketForward: FLOOD packet loop detected!");
+#if !defined(STM32_PLATFORM)
+      stats_history.countLooped();
+#endif
       return false;
     }
+  }
+  // firewall rules, flood packets only. Last, so it only sees (and its advert tracking only counts)
+  // floods that passed the checks above.
+  if (_prefs.firewall_enabled && packet->isRouteFlood()
+      && !firewall.isPacketAllowedForward(packet, recv_pkt_region, uptime_millis)) {
+    MESH_DEBUG_PRINTLN("allowPacketForward: FLOOD packet dropped by firewall");
+#if !defined(STM32_PLATFORM)
+    stats_history.countFirewallDrop();
+#endif
+    return false;
   }
   return true;
 }
@@ -477,6 +490,10 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
 }
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
+#if !defined(STM32_PLATFORM)
+  stats_history.countRx(pkt->getRawLength());
+#endif
+
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 1) {
     bridge.sendPacket(pkt);
@@ -503,6 +520,10 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 }
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
+#if !defined(STM32_PLATFORM)
+  stats_history.countTx(pkt->getRawLength());   // 'len' leaves out a scoped flood's transport codes
+#endif
+
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 0) {
     bridge.sendPacket(pkt);
@@ -889,9 +910,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
   // defaults
   _prefs.airtime_factor = 1.0;
-  _prefs.rx_delay_base = 0.0f;   // turn off by default, was 10.0;
-  _prefs.tx_delay_factor = 0.5f; // was 0.25f
-  _prefs.direct_tx_delay_factor = 0.3f; // was 0.2
+  _prefs.rx_delay_base = 3.0f;   // turn off by default, was 10.0;
+  _prefs.tx_delay_factor = 1.5f; // was 0.25f
+  _prefs.direct_tx_delay_factor = 1.0f; // was 0.2
   StrHelper::strncpy(_prefs.node_name, ADVERT_NAME, sizeof(_prefs.node_name));
   _prefs.node_lat = ADVERT_LAT;
   _prefs.node_lon = ADVERT_LON;
@@ -901,14 +922,17 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.bw = LORA_BW;
   _prefs.cr = LORA_CR;
   _prefs.tx_power_dbm = LORA_TX_POWER;
-  _prefs.advert_interval = 1;        // default to 2 minutes for NEW installs
-  _prefs.flood_advert_interval = 47; // 47 hours
+  _prefs.advert_interval = 32;          // 64 minutes
+  _prefs.flood_advert_interval = 72;    // 72 hours
   _prefs.flood_max = 64;
   _prefs.flood_max_unscoped = 64;
-  _prefs.flood_max_advert = 8;
+  _prefs.flood_max_advert = 64;         // distant adverts are limited by the firewall (advlm rules)
   _prefs.interference_threshold = 0; // disabled
   _prefs.cad_enabled = 0;            // hardware CAD before TX (off by default; 'set cad on')
-  _prefs.loop_detect = LOOP_DETECT_MINIMAL;
+  _prefs.loop_detect = LOOP_DETECT_STRICT;
+  _prefs.path_hash_mode = 2;         // 3-byte path hashes for our own floods
+  _prefs.multi_acks = 1;             // send an extra ACK ahead of each direct-routed ACK
+  _prefs.firewall_enabled = 1;       // firewall on by default ('set fw.enabled 0' to turn off)
 
   // bridge defaults
   _prefs.bridge_enabled = 1;    // enabled
@@ -950,6 +974,19 @@ void MyMesh::begin(FILESYSTEM *fs) {
   acl.load(_fs, self_id);
   // TODO: key_store.begin();
   region_map.load(_fs);
+
+  // no regions besides '*' (first install, an empty saved list, or one that failed to load): create the default
+  // regions with the 'region def' command, as if typed, then 'region save' (keeping what was loaded, eg. '*'s flags)
+  if (region_map.getCount() == 0 && DEFAULT_REGION_DEF[0]) {
+    char cmd[sizeof("region def " DEFAULT_REGION_DEF)];
+    char reply[161];
+    strcpy(cmd, "region def " DEFAULT_REGION_DEF);   // writable copy: the parser edits it in place
+    _cli.handleCommand(0, cmd, reply);
+    saveRegions();
+  }
+
+  // firewall rules, route policy and hop policy: the saved ones, or the built-in defaults if none are saved
+  firewall.begin(_fs, &region_map);   // after region_map.load(): rules can use region names
 
   // establish default-scope
   {
@@ -1195,6 +1232,16 @@ void MyMesh::clearStats() {
   ((SimpleMeshTables *)getTables())->resetStats();
 }
 
+// true if 'command' is the firewall table command 'name' (alone, or followed by a space). Then also removes spaces
+// at its end, as the table commands match whole words.
+static bool isTableCommand(char* command, const char* name) {
+  int len = strlen(name);
+  if (memcmp(command, name, len) != 0 || (command[len] != 0 && command[len] != ' ')) return false;
+  int end = strlen(command);
+  while (end > 0 && command[end - 1] == ' ') command[--end] = 0;
+  return true;
+}
+
 void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply) {
   if (region_load_active) {
     if (StrHelper::isBlank(command)) {  // empty/blank line, signal to terminate 'load' operation
@@ -1281,6 +1328,54 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+  } else if (isTableCommand(command, "fw")) {
+    // '<table> show' lists everything as commands: serial console only (too long for one reply)
+    if (strcmp(command, "fw show") != 0) {
+      firewall.handleCommand(&command[2], reply, _prefs.firewall_enabled, uptime_millis);
+    } else if (sender_timestamp == 0) {
+      firewall.printAll(Serial, _prefs.firewall_enabled);
+    } else {
+      strcpy(reply, "Err - fw show: serial console only, use fw show<p>");
+    }
+  } else if (isTableCommand(command, "routepol")) {
+    if (strcmp(command, "routepol show") != 0) {
+      firewall.getRoutePolicy()->handleCommand(&command[8], reply);
+    } else if (sender_timestamp == 0) {
+      firewall.getRoutePolicy()->printAll(Serial);
+    } else {
+      strcpy(reply, "Err - routepol show: serial console only, use routepol show<p>");
+    }
+  } else if (isTableCommand(command, "hoppol")) {
+    if (strcmp(command, "hoppol show") != 0) {
+      firewall.getHopPolicy()->handleCommand(&command[6], reply);
+    } else if (sender_timestamp == 0) {
+      firewall.getHopPolicy()->printAll(Serial);
+    } else {
+      strcpy(reply, "Err - hoppol show: serial console only, use hoppol show<p>");
+    }
+#if !defined(STM32_PLATFORM)
+  } else if (isTableCommand(command, "stats")) {   // 'stats', 'stats all', 'stats <minutes>' or 'stats +<minutes>'
+    const char* p = &command[5];
+    while (*p == ' ') p++;
+    if (*p == 0) {
+      stats_history.formatSummary(reply);
+    } else if (strcmp(p, "all") == 0) {   // every slot there is
+      stats_history.formatPeriod(STATS_HISTORY_SLOTS * 5, reply);
+    } else {
+      bool period = (*p == '+');
+      if (period) p++;
+      int minutes = 0;
+      bool any_digit = (*p >= '0' && *p <= '9');
+      while (*p >= '0' && *p <= '9' && minutes <= STATS_HISTORY_SLOTS * 5) minutes = minutes * 10 + (*p++ - '0');
+      if (!any_digit || *p != 0 || minutes < 5 || minutes > STATS_HISTORY_SLOTS * 5 || minutes % 5 != 0) {
+        strcpy(reply, "Err - use: stats [all|[+]<minutes: 5, 10, 15 ... 1440>]");
+      } else if (period) {
+        stats_history.formatPeriod(minutes, reply);
+      } else {
+        stats_history.formatSlot(minutes, reply);
+      }
+    }
+#endif
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
@@ -1329,6 +1424,19 @@ void MyMesh::loop() {
   uint32_t now = millis();
   uptime_millis += now - last_millis;
   last_millis = now;
+
+#if !defined(STM32_PLATFORM)
+  if (stats_history.isNoisefloorSampleDue(uptime_millis) && radio_driver.isInRecvMode()) {
+    stats_history.addNoisefloorSample(radio_driver.getCurrentRSSI());
+  }
+  stats_history.noteSendQueue(_mgr->getOutboundTotal());
+  StatsHistoryRunningTotals totals;
+  totals.airtime_rx_ms = getReceiveAirTime();
+  totals.airtime_tx_ms = getTotalAirTime();
+  totals.rx_errors = radio_driver.getPacketsRecvErrors();
+  totals.flood_dups = ((SimpleMeshTables *)getTables())->getNumFloodDups();
+  stats_history.update(uptime_millis, totals);
+#endif
 }
 
 // To check if there is pending work
