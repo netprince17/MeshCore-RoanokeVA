@@ -12,7 +12,7 @@ Three tables work together, each with its own CLI command:
 |---|---|---|
 | Firewall rules | `fw` | 32 rules, checked in slot order: the first rule that matches forwards or drops the packet |
 | Route policy | `routepol` | up to 32 repeater routes, for rules with `tl:routepol` |
-| Hop policy | `hoppol` | hop limits per path hash width and packet type, for rules with `tl:hoppol` |
+| Hop policy | `hoppol` | hop limits per payload type, route type and path hash width, for rules with `tl:hoppol` |
 
 All three tables load from flash at boot, or their built-in defaults if nothing is saved. Tracking tables (`tl:sendtrk`, `chantrk`, `pkttrk`) are in RAM only.
 
@@ -26,7 +26,7 @@ Rules are checked from slot 0 to 31, skipping empty slots. A rule applies when e
 |---|---|---|
 | `nm` | name | up to 8 characters |
 | `pt` | payload type | `req resp txt ack adv grptxt grpdata anonreq path trace multi ctrl raw`, or 0-15 |
-| `hp` | hop count (repeaters already passed) | `N` exactly, `<N` less than, `>N` more than |
+| `hp` | hop count (repeaters already passed, not counting dummy `000000` hashes at the start of a 3-byte-hash path) | `N` exactly, `<N` less than, `>N` more than |
 | `rb` | route path hash width | 1-3 bytes |
 | `rt` | route type | `flood` (unscoped), `tflood` (scoped), `direct`, `tdirect` |
 | `ch` | channel hash | hex, eg. `5e`: channel messages (`grptxt`, `grpdata`) on that channel only |
@@ -74,14 +74,17 @@ Distant packets can only push the channel's clock about 180 s ahead, so local us
  4 nm:anrqlm1  pt:anonreq hp:<7 tl:sendtrk      lb:6  lr:12h  ac:drop   nearby anon requests over 6, then 1 per 12 hours
  5 nm:anrqlm2  pt:anonreq hp:>6 tl:sendtrk      lb:6  lr:3d   ac:drop   other anon requests over 6, then 1 per 3 days
  6 nm:wrdrvlm  pt:grptxt  hp:>2 ch:81                         ac:drop   #wardriving: at most 3 repeaters
- 7 nm:chanlm1             hp:<7 tl:chantrk      lb:7  lr:15s  ac:fwd    nearby channel messages: always forwarded, but
+ 7 nm:chanlm1             hp:<7 tl:chantrk      lb:8  lr:15s  ac:fwd    nearby channel messages: always forwarded, but
                                                                         counted, so they use up the channel's allowance first
  8 nm:chanlm2             hp:>6 tl:chantrk      lb:6  lr:15s  ac:drop   other channel messages over 6, then 4 a minute, per channel
  9 nm:chanfld1 pt:grptxt  hp:>6 tl:pkttrk  ls:0 lb:10 lr:6s   ac:drop   other channel messages over 10, then 10 a minute, in total
-10 nm:chanfld2 pt:grpdata hp:>6 tl:pkttrk  ls:0 lb:10 lr:6s   ac:drop   (sharing slot 0 with chanfld1)
-11 nm:acptfld  rt:flood                                       ac:fwd    everything else
-12 nm:acpttfld rt:tflood                                      ac:fwd
+10 nm:sendfld1 pt:adv     hp:>6 tl:pkttrk  ls:1 lb:10 lr:6s   ac:drop   other adverts and anon requests over 10, then 10 a minute,
+11 nm:sendfld2 pt:anonreq hp:>6 tl:pkttrk  ls:1 lb:10 lr:6s   ac:drop   in total (sharing slot 1): catches senders with new keys
+12 nm:acptfld  rt:flood                                       ac:fwd    everything else
+13 nm:acpttfld rt:tflood                                      ac:fwd
 ```
+
+Distant channel data (`grpdata`) needs no total cap: the hop policy's `grpdata:6` already drops it.
 
 ## Route policy table
 
@@ -107,15 +110,10 @@ Example: `routepol 0 nm:reqfld1 rh:9e,4c ps:end`.
 
 This table limits how far certain kinds of packets travel, by route type, path hash width or payload type. For example, `txt:12` matches direct text messages that have already passed more than 12 repeaters.
 
-The table is a fixed list of 20 entries, each with a hop limit (0-64) or none (`-`). Each matches packets with one property:
+The table is a fixed list of 22 entries, each with a hop limit (0-64) or none (`-`). Each matches packets with one property:
 
 | Entry | Matches |
 |---|---|
-| `direct` | direct-routed packets, unscoped. The firewall only checks flood-routed packets, so this doesn't match yet |
-| `tdirect` | direct-routed packets, scoped. Doesn't match yet, as `direct` |
-| `rb1` | packets whose path uses 1-byte repeater hashes |
-| `rb2` | packets whose path uses 2-byte repeater hashes |
-| `rb3` | packets whose path uses 3-byte repeater hashes |
 | `req` | requests: remote management and stats, logged in |
 | `resp` | responses to requests |
 | `txt` | direct text messages (DMs) |
@@ -131,10 +129,17 @@ The table is a fixed list of 20 entries, each with a hop limit (0-64) or none (`
 | `pt13` | payload type 13, not used by MeshCore yet |
 | `pt14` | payload type 14, not used by MeshCore yet |
 | `raw` | raw custom packets (payload type 15) |
+| `direct` | direct-routed packets, unscoped. The firewall only checks flood-routed packets, so this doesn't match yet |
+| `tdirect` | direct-routed packets, scoped. Doesn't match yet, as `direct` |
+| `flood` | flood-routed packets, unscoped |
+| `tflood` | flood-routed packets, scoped |
+| `rb1` | packets whose path uses 1-byte repeater hashes |
+| `rb2` | packets whose path uses 2-byte repeater hashes |
+| `rb3` | packets whose path uses 3-byte repeater hashes |
 
-A packet is checked against every entry that applies to it (its path hash width and its payload type), and matches if it has passed more repeaters than any of those limits. Eg. with `txt:12` and `rb1:8`, a DM with 1-byte hashes is stopped after 8 repeaters.
+A packet is checked against every entry that applies to it (its payload type, route type and path hash width), and matches if it has passed more repeaters than any of those limits. Eg. with `txt:12` and `rb1:8`, a DM with 1-byte hashes is stopped after 8 repeaters. Each entry counts the packets it applies to as they pass through the table (seen), and the ones it caused a rule to act on (matched), shown as `seen/matched` on the `hoppol show<p>` pages.
 
-Adverts aren't in the list: their hop limit is upstream's `flood.max.advert` (and the sender tracking table limits them). Limits for all floods and unscoped floods are upstream's `flood.max` and `flood.max.unscoped`.
+`flood` and `tflood` overlap with upstream's `flood.max.unscoped` and `flood.max`, which are checked first: with both set, the lower limit wins. Adverts aren't in the list: their hop limit is upstream's `flood.max.advert` (and the sender tracking table limits them).
 
 Defaults: `req:6 resp:6 txt:12 ack:12 grpdata:6 anonreq:12 path:12 trace:6 multi:6 ctrl:1 raw:6`, the rest none.
 
@@ -171,7 +176,7 @@ Example: `fw 8 nm:chanlm2 hp:>6 tl:chantrk lb:6 lr:15s ac:drop`.
 
 `tl:pkttrk`
 
-This table puts one shared limit on whatever the rule matches. For example, it can cap all distant channel messages together, which also catches spam spread over many channel hashes.
+This table puts one shared limit on whatever the rule matches. For example, it can cap all distant channel messages together, which also catches spam spread over many channel hashes, or all distant adverts and anon requests together, which also catches senders using new keys.
 
 There are 16 numbered slots (`ls:0` to `ls:15`), each a clock in seconds. Rules using the same slot share its allowance.
 
@@ -194,7 +199,7 @@ Replies (except show pages) can be pasted back as commands. Show pages start wit
 | `fw senders` | the sender tracking table (`tl:sendtrk`): `tracking` senders whose limits are still in effect (allowance not fully back) out of 2048, then of those, the ones with `adverts` / `anonreqs` (a sender can be in both). `(overwriting)`: all 2048 are tracked, so a new sender replaces the one closest to fully recovered, losing its limits early |
 | `routepol ...` | the same as `fw`, without insert / collapse (fields `nm`, `rh`, `ps`); `show1` ... `show6`: 6 slots per page, `slot name match_count` |
 | `hoppol` | limits that are set, eg. `txt:12 path:12` |
-| `hoppol <words>` | `name:max` sets (`-` none), `name` shows, `show1` ... `show3`: 8 entries per page, `entry name match_count` |
+| `hoppol <words>` | `name:max` sets (`-` none), `name` shows, `show1` ... `show5`: 5 entries per page, `entry name seen/matched` |
 | `hoppol show` | every entry's limit as `hoppol` commands (serial console only) |
 | `hoppol clear` / `setdefault` / `save` / `reload` / `unsave` | |
 

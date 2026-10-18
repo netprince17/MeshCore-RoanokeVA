@@ -987,6 +987,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
   // firewall rules, route policy and hop policy: the saved ones, or the built-in defaults if none are saved
   firewall.begin(_fs, &region_map);   // after region_map.load(): rules can use region names
+#if !defined(STM32_PLATFORM)
+  reports.begin(_fs);
+#endif
 
   // establish default-scope
   {
@@ -1376,6 +1379,9 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       }
     }
 #endif
+#if !defined(STM32_PLATFORM)
+  } else if (reports.handleCommand(command, reply)) {   // set / get reports.* and alerts.*
+#endif
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
@@ -1435,9 +1441,67 @@ void MyMesh::loop() {
   totals.airtime_tx_ms = getTotalAirTime();
   totals.rx_errors = radio_driver.getPacketsRecvErrors();
   totals.flood_dups = ((SimpleMeshTables *)getTables())->getNumFloodDups();
-  stats_history.update(uptime_millis, totals);
+  if (stats_history.update(uptime_millis, totals)) {   // a slot was stored: check the alerts
+    char alerts[3][64];
+    int n = reports.checkAlerts(uptime_millis, board.getBattMilliVolts(), stats_history, alerts);
+    for (int i = 0; i < n; i++) sendReportText(alerts[i], 0);
+  }
 #endif
 }
+
+#if !defined(STM32_PLATFORM)
+// the reports channel, while reports are on
+int MyMesh::searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel channels[], int max_matches) {
+  if (max_matches > 0 && reports.isChannel(hash)) {
+    channels[0] = reports.getChannel();
+    return 1;
+  }
+  return 0;
+}
+
+// a message on the reports channel: reply if it's a report request for this repeater (Reports::acceptRequest())
+void MyMesh::onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data,
+                             size_t len) {
+  uint32_t delay_millis;
+  if (!reports.acceptRequest(packet, type, data, len, region_map, _prefs.node_name, getRNG(), uptime_millis,
+                             delay_millis)) return;
+  char text[REPORTS_MAX_TEXT + 1];
+  reports.formatReport(text, sizeof(text), FIRMWARE_VERSION, uptime_millis, board.getBattMilliVolts(),
+                       countNeighbours(), stats_history);
+  sendReportText(text, delay_millis);
+}
+
+// 0-hop repeater neighbours heard in the last 7 days, or -1 if this build keeps no neighbour table
+int MyMesh::countNeighbours() {
+#if MAX_NEIGHBOURS
+  uint32_t now = getRTCClock()->getCurrentTime();
+  int count = 0;
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    uint32_t heard = neighbours[i].heard_timestamp;
+    if (heard > 0 && now - heard <= 7UL * 24 * 60 * 60) count++;   // unsigned: a time ahead of 'now' is skipped
+  }
+  return count;
+#else
+  return -1;
+#endif
+}
+
+// Sends "<name>: <text>" on the reports channel, scoped to the region (Reports::prepareToSend()). It goes through the
+// same send queue as any flood (Mesh::sendFlood(): priority 1), so the same send checks apply (listen before
+// transmit, duty cycle). False if it couldn't be sent.
+bool MyMesh::sendReportText(const char* text, uint32_t delay_millis) {
+  TransportKey scope;
+  if (!reports.getScope(region_map, scope)) return false;
+  uint8_t data[5 + REPORTS_MAX_TEXT + 1];
+  int len = Reports::buildMessage(data, getRTCClock()->getCurrentTimeUnique(), _prefs.node_name, text);
+  mesh::Packet* pkt = createGroupDatagram(PAYLOAD_TYPE_GRP_TXT, reports.getChannel(), data, len);
+  if (pkt == NULL) return false;
+  reports.prepareToSend(pkt, scope);
+  getTables()->markSeen(pkt);   // in case it's repeated back to us
+  sendPacket(pkt, 1, delay_millis);
+  return true;
+}
+#endif
 
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {

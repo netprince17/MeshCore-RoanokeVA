@@ -78,17 +78,18 @@ static const char* const FIREWALL_DEFAULT_RULES[] = {
   "nm:wrdrvlm  pt:grptxt  hp:>2 ch:81                               ac:drop",
 
   // limit distant messages to each channel, prioritize local channels
-  "nm:chanlm1             hp:<7       tl:chantrk       lb:7  lr:15s ac:fwd",
+  "nm:chanlm1             hp:<7       tl:chantrk       lb:8  lr:15s ac:fwd",
   "nm:chanlm2             hp:>6       tl:chantrk       lb:6  lr:15s ac:drop",
 
-  // total cap on distant channel messages
+  // total cap on distant tracking tables (chantrk and sendtrk can be abused)
   "nm:chanfld1 pt:grptxt  hp:>6       tl:pkttrk   ls:0 lb:10 lr:6s  ac:drop",
-  "nm:chanfld2 pt:grpdata hp:>6       tl:pkttrk   ls:0 lb:10 lr:6s  ac:drop",
+  "nm:sendfld1 pt:adv     hp:>6       tl:pkttrk   ls:1 lb:8 lr:6s   ac:drop",
+  "nm:sendfld2 pt:anonreq hp:>6       tl:pkttrk   ls:1 lb:8 lr:6s   ac:drop",
 
   // accept remaining traffic
   "nm:acptfld  rt:flood                                             ac:fwd",
   "nm:acpttfld rt:tflood                                            ac:fwd",
-  
+
   nullptr
 };
 
@@ -241,7 +242,7 @@ public:
 
   bool isPacketAllowedForward(const mesh::Packet* packet, const RegionEntry* region, uint64_t uptime_millis) {
     uint8_t packet_type = packet->getPayloadType();
-    uint8_t hop_count = packet->getPathHashCount();
+    uint8_t hop_count = realHopCount(packet);
     bool is_channel = (packet_type == PAYLOAD_TYPE_GRP_TXT || packet_type == PAYLOAD_TYPE_GRP_DATA)
                       && packet->payload_len > 0;
 
@@ -297,7 +298,7 @@ public:
           route_slot = _route_policy.findMatch(packet->path, packet->getPathHashSize(), packet->getPathHashCount());
           if (route_slot < 0) continue;
         } else if (r->table_lookup == FIREWALL_LOOKUP_HOP_POLICY) {    // over a hop limit that applies to it
-          hop_entry = _hop_policy.findMatch(packet);
+          hop_entry = _hop_policy.findMatch(packet, hop_count);
           if (hop_entry < 0) continue;
         } else if (r->table_lookup == FIREWALL_LOOKUP_SENDER_TRACKING) {   // sender over lb / lr
           if (!_senders.isOverLimit(packet, uptime_millis, r->limit_recovery, r->limit_burst)) continue;
@@ -542,6 +543,20 @@ public:
     return &_rules[number];
   }
 
+  // Repeaters the packet has really passed: its path hashes, less any dummy 3-byte 000000 hashes at the start (a
+  // sender can pre-fill the path with them so the packet is relayed only a few times, as reports do).
+  static uint8_t realHopCount(const mesh::Packet* packet) {
+    uint8_t count = packet->getPathHashCount();
+    if (packet->getPathHashSize() != 3) return count;
+    uint8_t dummy = 0;
+    while (dummy < count) {
+      const uint8_t* h = &packet->path[dummy * 3];
+      if (h[0] != 0 || h[1] != 0 || h[2] != 0) break;
+      dummy++;
+    }
+    return count - dummy;
+  }
+
   // set() name of a PAYLOAD_TYPE_* value, or "" if it has none (use the number)
   static const char* packetTypeName(uint8_t type) {
     // names, indexed by PAYLOAD_TYPE_* value ("" = unused type)
@@ -762,8 +777,8 @@ public:
         sprintf(reply, "Err - use: fw show<1-%d>", (FIREWALL_MAX_RULES + FIREWALL_PAGE_SLOTS - 1) / FIREWALL_PAGE_SLOTS);
         return;
       }
-      // "firewall on" / "off", then one aligned line per rule: slot, name, match count (the first line keeps the
-      // rules left-aligned in clients that put a prompt before it)
+      // "firewall on" / "off", then one line per rule: slot, name, match count (the first line keeps the rules
+      // left-aligned in clients that put a prompt before it)
       int n;
       if (enabled) {
         n = sprintf(reply, "firewall on");
@@ -778,7 +793,7 @@ public:
         const char* name = r->name;
         if (name[0] == 0) name = "?";
         char item[32];
-        int len = sprintf(item, "%2d %-*s %lu", i, FIREWALL_NAME_LEN, name, (unsigned long)r->match_count);
+        int len = sprintf(item, "%d %s %lu", i, name, (unsigned long)r->match_count);
         n = addLine(reply, n, item, len, more);
         shown++;
       }

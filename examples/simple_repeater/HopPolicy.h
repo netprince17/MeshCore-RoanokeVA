@@ -9,7 +9,8 @@
 // Hop policy, for firewall rules with tl:hoppol: a fixed list of packet properties (route type, path hash width,
 // packet type), each with an optional hop limit (repeaters passed, as the firewall's hp). A packet matches if it
 // is over any limit that applies to it. Loaded at boot from HOP_POLICY_FILE, or HOP_POLICY_DEFAULT_LIMITS.
-// Hop limits for all floods and adverts are upstream's flood.max, flood.max.unscoped and flood.max.advert.
+// flood / tflood overlap upstream's flood.max.unscoped / flood.max (checked first: the lower limit wins); adverts'
+// hop limit is upstream's flood.max.advert.
 
 #define HOP_POLICY_NONE          0xFF   // _max_hops value: no limit
 #define HOP_POLICY_MAX_HOPS      64     // highest limit that can be set (a path holds at most 63 hops, so 64 is
@@ -20,10 +21,9 @@
 #define HOP_POLICY_ROUTE_BYTES   2      // value: path hash width, 1, 2 or 3 bytes
 #define HOP_POLICY_PACKET_TYPE   3      // value: PAYLOAD_TYPE_*
 
-#define HOP_POLICY_ENTRIES       20     // number of entries in the fixed list
-#define HOP_POLICY_PAGE_ENTRIES  8      // entries per 'hoppol show<p>' page
+#define HOP_POLICY_ENTRIES       22     // number of entries in the fixed list
+#define HOP_POLICY_PAGE_ENTRIES  5      // entries per 'hoppol show<p>' page (fits large seen / matched counts)
 #define HOP_POLICY_PAGES         ((HOP_POLICY_ENTRIES + HOP_POLICY_PAGE_ENTRIES - 1) / HOP_POLICY_PAGE_ENTRIES)
-#define HOP_POLICY_NAME_LEN      7      // longest entry name, for aligned show pages
 
 // Default limits (loadDefaults(), when none are saved, or 'hoppol setdefault'): "name:max" pairs, entries not
 // named have no limit. nullptr ends the list.
@@ -54,6 +54,7 @@ struct HopPolicyEntry {
 
 class HopPolicy : private TableCli {
   uint8_t _max_hops[HOP_POLICY_ENTRIES];       // per entry: most hops allowed, HOP_POLICY_NONE = no limit
+  uint32_t _seen_counts[HOP_POLICY_ENTRIES];   // per entry: packets it applied to, as they passed through
   uint32_t _match_counts[HOP_POLICY_ENTRIES];  // per entry: times its limit made a firewall rule act
   FILESYSTEM* _fs;                             // where the limits are saved, set by begin()
 
@@ -132,11 +133,6 @@ public:
   // the fixed list of entries, in check order
   static const HopPolicyEntry* getEntry(int i) {
     static const HopPolicyEntry list[HOP_POLICY_ENTRIES] = {
-      { "direct",  HOP_POLICY_ROUTE_TYPE,  ROUTE_TYPE_DIRECT },
-      { "tdirect", HOP_POLICY_ROUTE_TYPE,  ROUTE_TYPE_TRANSPORT_DIRECT },
-      { "rb1",     HOP_POLICY_ROUTE_BYTES, 1 },                            // 1-byte path hashes
-      { "rb2",     HOP_POLICY_ROUTE_BYTES, 2 },
-      { "rb3",     HOP_POLICY_ROUTE_BYTES, 3 },
       { "req",     HOP_POLICY_PACKET_TYPE, PAYLOAD_TYPE_REQ },
       { "resp",    HOP_POLICY_PACKET_TYPE, PAYLOAD_TYPE_RESPONSE },
       { "txt",     HOP_POLICY_PACKET_TYPE, PAYLOAD_TYPE_TXT_MSG },
@@ -152,6 +148,13 @@ public:
       { "pt13",    HOP_POLICY_PACKET_TYPE, 0x0D },                          // not used yet
       { "pt14",    HOP_POLICY_PACKET_TYPE, 0x0E },                          // not used yet
       { "raw",     HOP_POLICY_PACKET_TYPE, PAYLOAD_TYPE_RAW_CUSTOM },
+      { "direct",  HOP_POLICY_ROUTE_TYPE,  ROUTE_TYPE_DIRECT },             // direct: not checked yet
+      { "tdirect", HOP_POLICY_ROUTE_TYPE,  ROUTE_TYPE_TRANSPORT_DIRECT },
+      { "flood",   HOP_POLICY_ROUTE_TYPE,  ROUTE_TYPE_FLOOD },              // unscoped flood-routed packets
+      { "tflood",  HOP_POLICY_ROUTE_TYPE,  ROUTE_TYPE_TRANSPORT_FLOOD },    // scoped flood-routed packets
+      { "rb1",     HOP_POLICY_ROUTE_BYTES, 1 },                            // 1-byte path hashes
+      { "rb2",     HOP_POLICY_ROUTE_BYTES, 2 },
+      { "rb3",     HOP_POLICY_ROUTE_BYTES, 3 },
     };
     if (i < 0 || i >= HOP_POLICY_ENTRIES) return nullptr;
     return &list[i];
@@ -165,15 +168,17 @@ public:
     return -1;
   }
 
-  // Returns the first entry that applies to the packet and whose limit it is over, or -1.
-  int findMatch(const mesh::Packet* packet) const {
-    uint8_t hop_count = packet->getPathHashCount();
+  // Returns the first entry that applies to the packet and whose limit it is over, or -1. Counts the packet as
+  // seen by every entry that applies to it, limit or not.
+  // 'hop_count': repeaters it has passed (FirewallTable::realHopCount()).
+  int findMatch(const mesh::Packet* packet, uint8_t hop_count) {
+    int match = -1;
     for (int i = 0; i < HOP_POLICY_ENTRIES; i++) {
-      if (_max_hops[i] == HOP_POLICY_NONE) continue;   // no limit
-      if (hop_count <= _max_hops[i]) continue;         // within the limit
-      if (appliesTo(getEntry(i), packet)) return i;
+      if (!appliesTo(getEntry(i), packet)) continue;
+      _seen_counts[i]++;
+      if (match < 0 && _max_hops[i] != HOP_POLICY_NONE && hop_count > _max_hops[i]) match = i;
     }
-    return -1;
+    return match;
   }
 
   // Sets limits from "name:max" pairs (max 0-64, '-' none); entries not named don't change. All or nothing.
@@ -199,10 +204,11 @@ public:
     return n;
   }
 
-  // removes every limit (and match count)
+  // removes every limit (and seen / match count)
   void clear() {
     for (int i = 0; i < HOP_POLICY_ENTRIES; i++) {
       _max_hops[i] = HOP_POLICY_NONE;
+      _seen_counts[i] = 0;
       _match_counts[i] = 0;
     }
   }
@@ -238,7 +244,7 @@ public:
   // CLI 'hoppol'. Replies, except show pages, can be pasted back as commands.
   //   hoppol                 entries with a limit, eg. "txt:12 path:12"
   //   hoppol <words>         name:max sets a limit (0-64, '-' none), name shows one, show<p> a page of
-  //                          HOP_POLICY_PAGE_ENTRIES ("OK", then "entry name match_count" lines).
+  //                          HOP_POLICY_PAGE_ENTRIES ("OK", then "entry name seen/matched" lines).
   //                          All or nothing. Replies the shown values, or "OK".
   //   hoppol clear | setdefault | save | reload   (setdefault isn't saved until 'hoppol save')
   //   hoppol unsave          removes the saved limits (the current ones stay): the defaults load at boot
@@ -383,11 +389,14 @@ private:
     return nullptr;
   }
 
-  // Takes the limits parsed by parse(), and resets the match counts of the entries that were set.
+  // Takes the limits parsed by parse(), and resets the seen / match counts of the entries that were set.
   void apply(const uint8_t* max_hops, const bool* named) {
     for (int i = 0; i < HOP_POLICY_ENTRIES; i++) {
       _max_hops[i] = max_hops[i];
-      if (named[i]) _match_counts[i] = 0;
+      if (named[i]) {
+        _seen_counts[i] = 0;
+        _match_counts[i] = 0;
+      }
     }
   }
 
@@ -421,13 +430,14 @@ private:
     }
   }
 
-  // Adds "name:max" for entry 'i' at reply[n] (page: an aligned "entry name match_count" line), or counts
+  // Adds "name:max" for entry 'i' at reply[n] (page: an "entry name seen/matched" line), or counts
   // it in 'more' if the reply would get too long. Returns the length.
   int addValue(char* reply, int n, int i, bool page, int& more) const {
     char item[40];
     int len;
-    if (page) {   // "entry name match_count", aligned
-      len = sprintf(item, "%2d %-*s %lu", i, HOP_POLICY_NAME_LEN, getEntry(i)->name, (unsigned long)_match_counts[i]);
+    if (page) {   // "entry name seen/matched"
+      len = sprintf(item, "%d %s %lu/%lu", i, getEntry(i)->name, (unsigned long)_seen_counts[i],
+                    (unsigned long)_match_counts[i]);
     } else {
       len = sprintf(item, "%s:", getEntry(i)->name);
       len += formatMax(&item[len], _max_hops[i]);

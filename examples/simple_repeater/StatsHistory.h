@@ -95,15 +95,15 @@ public:
                   _tx_budget_held(false), _looped_now(0), _noisefloor_sample_count(0),
                   _next_noisefloor_sample_millis(0) { }
 
-  // From MyMesh::loop(): when a slot's 5 minutes are up, stores its readings and starts the next slot. The first
-  // call only starts the first slot.
-  void update(uint64_t uptime_millis, const StatsHistoryRunningTotals& totals) {
+  // From MyMesh::loop(): when a slot's 5 minutes are up, stores its readings and starts the next slot (then returns
+  // true). The first call only starts the first slot.
+  bool update(uint64_t uptime_millis, const StatsHistoryRunningTotals& totals) {
     if (_next_slot_millis == 0) {   // first call: start measuring
       _next_slot_millis = uptime_millis + STATS_HISTORY_SLOT_MILLIS;
       _at_start = totals;
-      return;
+      return false;
     }
-    if (uptime_millis < _next_slot_millis) return;
+    if (uptime_millis < _next_slot_millis) return false;
 
     // the slot is over: store it in the next ring position (the oldest, once full)
     _newest = (_newest + 1) % STATS_HISTORY_SLOTS;
@@ -142,6 +142,7 @@ public:
 
     _at_start = totals;
     _next_slot_millis += STATS_HISTORY_SLOT_MILLIS;   // exactly one slot on, so slots don't drift
+    return true;
   }
 
   // From MyMesh::logRx() / logTx(): counts a decoded packet received / a packet sent, 'bytes' long, in the slot
@@ -208,6 +209,9 @@ public:
     _noisefloor_samples[_noisefloor_sample_count++] = (int8_t)floorf(rssi + 0.5f);
   }
 
+  // slots holding data
+  int getCount() const { return _count; }
+
   // the slot 'age' slots back (0 = the last 5 minutes), or nullptr if there's no such slot
   const StatsHistorySlot* getSlot(int age) const {
     if (age < 0 || age >= _count) return nullptr;
@@ -258,8 +262,14 @@ public:
     formatTotals(t, reply);
   }
 
-private:
-  // a group of slots added up, for the CLI
+  // 'sum' / 'n', rounded to nearest (negative sums too), or 0 if n is 0
+  static int average(int32_t sum, int n) {
+    if (n <= 0) return 0;
+    if (sum < 0) return -(int)((-sum + n / 2) / n);
+    return (int)((sum + n / 2) / n);
+  }
+
+  // a group of slots added up (sumNewest())
   struct StatsHistoryTotals {
     int slots;                                             // slots added up
     uint32_t rx_packets, tx_packets, rx_bytes, tx_bytes;
@@ -271,6 +281,10 @@ private:
     uint32_t tx_deferred, tx_forced, tx_budget_holds, looped;
   };
 
+  // Adds up the newest 'n' slots (as far as there are slots) into 't'.
+  void sumNewest(int n, StatsHistoryTotals& t) const { sumSlots(0, n, t); }
+
+private:
   // which stat formatSummaryValues() writes
   enum SummaryStat { SUMMARY_AIRTIME_RX, SUMMARY_AIRTIME_TX, SUMMARY_NOISEFLOOR };
 
@@ -345,13 +359,6 @@ private:
   static int formatNoisefloor(char* dest, const StatsHistoryTotals& t) {
     if (t.noisefloor_slots == 0) return sprintf(dest, "-");
     return sprintf(dest, "%d", average(t.noisefloor_sum, t.noisefloor_slots));
-  }
-
-  // 'sum' / 'n', rounded to nearest (negative sums too), or 0 if n is 0
-  static int average(int32_t sum, int n) {
-    if (n <= 0) return 0;
-    if (sum < 0) return -(int)((-sum + n / 2) / n);
-    return (int)((sum + n / 2) / n);
   }
 
   // median of the slot's noise floor readings (sorts them), or STATS_HISTORY_NOISEFLOOR_NONE if there are none

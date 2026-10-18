@@ -322,7 +322,7 @@ public:
 
   // CLI 'routepol': the same commands as 'fw' (see FirewallTable::handleCommand()), without insert / collapse.
   // 'routepol show' (every route, serial console only) is handled by MyMesh (printAll()). Show pages: "OK", then
-  // aligned "slot name match_count" lines.
+  // "slot name match_count" lines.
   void handleCommand(const char* command, char* reply) {
     while (*command == ' ') command++;
 
@@ -391,7 +391,7 @@ public:
         const char* name = e->name;
         if (name[0] == 0) name = "?";
         char item[32];
-        int len = sprintf(item, "%2d %-*s %lu", i, ROUTE_POLICY_NAME_LEN, name, (unsigned long)_match_counts[i]);
+        int len = sprintf(item, "%d %s %lu", i, name, (unsigned long)_match_counts[i]);
         n = addLine(reply, n, item, len, more);
         shown++;
       }

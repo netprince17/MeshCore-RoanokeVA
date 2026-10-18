@@ -38,6 +38,7 @@
 #include "RateLimiter.h"
 #include "FirewallTable.h"
 #include "StatsHistory.h"
+#include "Reports.h"
 
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
@@ -105,6 +106,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   FirewallTable firewall;         // rules deciding which received packets are forwarded
 #if !defined(STM32_PLATFORM)
   StatsHistory stats_history;     // repeater stats, 5-minute slots for 24 hours (RAM only)
+  Reports reports;                // replies and alerts on the reports channel
 #endif
   uint32_t pending_discover_tag;
   unsigned long pending_discover_until;
@@ -153,6 +155,11 @@ protected:
   void logTxDeferred() override { stats_history.countTxDeferred(); }
   void logTxForced() override { stats_history.countTxForced(); }
   void logTxBudgetHold() override { stats_history.countTxBudgetHold(); }
+  int searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel channels[], int max_matches) override;
+  void onGroupDataRecv(mesh::Packet* packet, uint8_t type, const mesh::GroupChannel& channel, uint8_t* data,
+                       size_t len) override;
+  bool sendReportText(const char* text, uint32_t delay_millis);
+  int countNeighbours();
 #endif
   int calcRxDelay(float score, uint32_t air_time) const override;
 
