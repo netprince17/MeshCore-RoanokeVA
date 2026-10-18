@@ -69,7 +69,7 @@ Distant packets can only push the channel's clock about 180 s ahead, so local us
 ```
  0 nm:routepol                  tl:routepol                   ac:drop   packets on listed routes
  1 nm:hoppol                    tl:hoppol                     ac:drop   packets over a hop limit
- 2 nm:advlm1   pt:adv     hp:<7 tl:sendtrk      lb:3  lr:4h   ac:drop   nearby adverts over 3, then 1 per 4 hours
+ 2 nm:advlm1   pt:adv     hp:<7 tl:sendtrk      lb:6  lr:12h  ac:drop   nearby adverts over 6, then 1 per 12 hours
  3 nm:advlm2   pt:adv     hp:>6 tl:sendtrk      lb:1  lr:3d   ac:drop   other adverts over 1 per 3 days
  4 nm:anrqlm1  pt:anonreq hp:<7 tl:sendtrk      lb:6  lr:12h  ac:drop   nearby anon requests over 6, then 1 per 12 hours
  5 nm:anrqlm2  pt:anonreq hp:>6 tl:sendtrk      lb:6  lr:3d   ac:drop   other anon requests over 6, then 1 per 3 days
@@ -77,9 +77,9 @@ Distant packets can only push the channel's clock about 180 s ahead, so local us
  7 nm:chanlm1             hp:<7 tl:chantrk      lb:8  lr:15s  ac:fwd    nearby channel messages: always forwarded, but
                                                                         counted, so they use up the channel's allowance first
  8 nm:chanlm2             hp:>6 tl:chantrk      lb:6  lr:15s  ac:drop   other channel messages over 6, then 4 a minute, per channel
- 9 nm:chanfld1 pt:grptxt  hp:>6 tl:pkttrk  ls:0 lb:10 lr:6s   ac:drop   other channel messages over 10, then 10 a minute, in total
-10 nm:sendfld1 pt:adv     hp:>6 tl:pkttrk  ls:1 lb:10 lr:6s   ac:drop   other adverts and anon requests over 10, then 10 a minute,
-11 nm:sendfld2 pt:anonreq hp:>6 tl:pkttrk  ls:1 lb:10 lr:6s   ac:drop   in total (sharing slot 1): catches senders with new keys
+ 9 nm:chandos1 pt:grptxt  hp:>6 tl:pkttrk  ls:0 lb:10 lr:6s   ac:drop   other channel messages over 10, then 10 a minute, in total
+10 nm:senddos1 pt:adv     hp:>6 tl:pkttrk  ls:1 lb:8  lr:15s  ac:drop   other adverts and anon requests over 8, then 4 a minute,
+11 nm:senddos2 pt:anonreq hp:>6 tl:pkttrk  ls:1 lb:8  lr:15s  ac:drop   in total (sharing slot 1): catches senders with new keys
 12 nm:acptfld  rt:flood                                       ac:fwd    everything else
 13 nm:acpttfld rt:tflood                                      ac:fwd
 ```
@@ -180,7 +180,7 @@ This table puts one shared limit on whatever the rule matches. For example, it c
 
 There are 16 numbered slots (`ls:0` to `ls:15`), each a clock in seconds. Rules using the same slot share its allowance.
 
-Example: `fw 9 nm:chanfld1 pt:grptxt hp:>6 tl:pkttrk ls:0 lb:10 lr:6s ac:drop`.
+Example: `fw 9 nm:chandos1 pt:grptxt hp:>6 tl:pkttrk ls:0 lb:10 lr:6s ac:drop`.
 
 ## CLI
 

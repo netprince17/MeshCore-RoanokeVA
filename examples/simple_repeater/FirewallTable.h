@@ -67,7 +67,7 @@ static const char* const FIREWALL_DEFAULT_RULES[] = {
   "nm:hoppol                          tl:hoppol                     ac:drop",
 
   // track and restrict advertisements
-  "nm:advlm1   pt:adv     hp:<7       tl:sendtrk       lb:3  lr:4h  ac:drop",
+  "nm:advlm1   pt:adv     hp:<7       tl:sendtrk       lb:6  lr:12h ac:drop",
   "nm:advlm2   pt:adv     hp:>6       tl:sendtrk       lb:1  lr:3d  ac:drop",
 
   // track and restrict anonymous requests
@@ -82,9 +82,9 @@ static const char* const FIREWALL_DEFAULT_RULES[] = {
   "nm:chanlm2             hp:>6       tl:chantrk       lb:6  lr:15s ac:drop",
 
   // total cap on distant tracking tables (chantrk and sendtrk can be abused)
-  "nm:chanfld1 pt:grptxt  hp:>6       tl:pkttrk   ls:0 lb:10 lr:6s  ac:drop",
-  "nm:sendfld1 pt:adv     hp:>6       tl:pkttrk   ls:1 lb:8 lr:6s   ac:drop",
-  "nm:sendfld2 pt:anonreq hp:>6       tl:pkttrk   ls:1 lb:8 lr:6s   ac:drop",
+  "nm:chandos1 pt:grptxt  hp:>6       tl:pkttrk   ls:0 lb:10 lr:6s  ac:drop",
+  "nm:senddos1 pt:adv     hp:>6       tl:pkttrk   ls:1 lb:8 lr:15s  ac:drop",
+  "nm:senddos2 pt:anonreq hp:>6       tl:pkttrk   ls:1 lb:8 lr:15s  ac:drop",
 
   // accept remaining traffic
   "nm:acptfld  rt:flood                                             ac:fwd",
