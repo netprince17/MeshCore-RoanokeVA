@@ -12,7 +12,7 @@ This is a build of [MeshCore](https://github.com/meshcore-dev/MeshCore) for the 
 
 ## Getting started
 
-1. Download the repeater firmware for your board from this repository's [Releases](../../releases).  Make sure you pick the one for your exact hardware.
+1. Download the repeater firmware for your board from this repository's [Releases](../../releases).  Make sure you pick the one for your exact hardware.  *The version with 'merged' in the name will erase your current settings, and the version without 'merged' in the name will keep your current settings.*
 2. Open the standard [MeshCore flasher](https://flasher.meshcore.io). Instead of selecting your hardware from the list, choose **Custom Firmware** and select the file you downloaded.
 3. Flash the firmware.
 4. On the same page, use the 'Repeater Setup' link to set the name of the repeater.  
