@@ -395,8 +395,10 @@ public:
         n = addLine(reply, n, item, len, more);
         shown++;
       }
-      if (shown == 0 && more == 0) {
-        strcpy(reply, "none");
+      if (shown == 0 && more == 0) {   // the page's slot range, eg. "no routes 6-11"
+        int last = first + ROUTE_POLICY_PAGE_SLOTS - 1;
+        if (last >= ROUTE_POLICY_MAX_ROUTES) last = ROUTE_POLICY_MAX_ROUTES - 1;
+        sprintf(reply, "no routes %d-%d", first, last);
       } else if (more > 0) {
         sprintf(&reply[n], "\n+%d more", more);
       }

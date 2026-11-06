@@ -10,8 +10,10 @@
 // Replies (reports.enabled, off by default) and alerts (alerts.enabled, on by default) are switched separately:
 //   'report'        every repeater with reports on replies (random 1-30 s delay), at most once per cooldown
 //   'report <name>' only the repeater with that name (not case-sensitive) replies, after 1-3 s, no cooldown
-//   alerts          battery low, RX airtime high, noise floor up: each after 2 completed stats slots in a row out of
-//                   range, at most once per alerts cooldown, from 15 minutes after boot (noise floor: 1 hour)
+//   alerts          battery low (the slot's median reading), RX airtime high, noise floor up, primary missed
+//                   (backup mode: relays sent because no primary relayed them): each after 2 completed
+//                   stats slots in a row out of range, at most once per alerts cooldown, from 15 minutes after boot
+//                   (noise floor: 1 hour)
 // Only requests sent in the region, and relayed at most reports.hops.max times, are answered; replies and alerts are
 // relayed at most that many times too. Settings: 'set' / 'get' reports.* and alerts.*, saved in REPORTS_FILE.
 // MyMesh only hooks it up: the channel, creating and sending the packets, and the values only it has.
@@ -37,6 +39,7 @@
 #define REPORTS_NAMED_DELAY_MAX      3000
 #define REPORTS_ALERT_START_MILLIS   (15UL * 60 * 1000)   // no alerts this soon after boot, eg. boot loops
 #define REPORTS_NOISEFLOOR_MIN_SLOTS 12        // noise floor alert: at least 1 hour of stats history first
+#define REPORTS_MAX_ALERTS           4         // alerts checkAlerts() can write at once
 
 // the settings, saved in REPORTS_FILE
 struct ReportSettings {
@@ -49,6 +52,7 @@ struct ReportSettings {
   uint8_t  alert_battery;         // alerts.battery: tenths of a volt, 0 = off
   uint8_t  alert_noisefloor;      // alerts.noisefloor: dB above the history's average, 0 = off
   uint8_t  alert_airtime;         // alerts.airtime: RX airtime %, 0 = off
+  uint8_t  alert_primary_missed;  // alerts.primary.missed: relays sent per slot, no primary relayed them, 0 = off
   uint16_t alert_cooldown_mins;   // alerts.cooldown: between repeats of the same alert, 15-1440
 };
 
@@ -57,12 +61,12 @@ class Reports {
   FILESYSTEM* _fs;
   mesh::GroupChannel _channel;      // made from _s.key
   uint64_t _next_reply_millis;      // 'report' answered again from this uptime
-  uint8_t _battery_low_count;       // slot ends in a row with the battery low
   uint64_t _next_battery_alert, _next_airtime_alert, _next_noisefloor_alert;   // uptime each may repeat from
+  uint64_t _next_primary_missed_alert;
 
 public:
-  Reports(): _fs(nullptr), _next_reply_millis(0), _battery_low_count(0), _next_battery_alert(0),
-             _next_airtime_alert(0), _next_noisefloor_alert(0) {
+  Reports(): _fs(nullptr), _next_reply_millis(0), _next_battery_alert(0),
+             _next_airtime_alert(0), _next_noisefloor_alert(0), _next_primary_missed_alert(0) {
     setDefaults();
   }
 
@@ -182,28 +186,24 @@ public:
     pkt->setPathHashSizeAndCount(3, pad);
   }
 
-  // From MyMesh::loop() when a stats slot has just been stored: checks the alerts. Writes up to 3 alert texts
-  // (each up to 64 chars) and returns how many. 'batt_mv': the battery now (1 V or less: no battery sensing).
-  int checkAlerts(uint64_t uptime_millis, uint16_t batt_mv, const StatsHistory& stats, char texts[3][64]) {
+  // From MyMesh::loop() when a stats slot has just been stored: checks the alerts. Writes up to REPORTS_MAX_ALERTS
+  // alert texts (each up to 64 chars) and returns how many. 'backup_active': backup mode is on.
+  int checkAlerts(uint64_t uptime_millis, bool backup_active, const StatsHistory& stats,
+                  char texts[REPORTS_MAX_ALERTS][64]) {
     int n = 0;
-    if (!_s.alerts_enabled) return 0;
-
-    // battery: low at 2 slot ends in a row
-    if (_s.alert_battery > 0 && batt_mv > 1000 && batt_mv < _s.alert_battery * 100) {
-      if (_battery_low_count < 255) _battery_low_count++;
-    } else {
-      _battery_low_count = 0;
-    }
-    if (uptime_millis < REPORTS_ALERT_START_MILLIS) return 0;
+    if (!_s.alerts_enabled || uptime_millis < REPORTS_ALERT_START_MILLIS) return 0;
     uint64_t cooldown = (uint64_t)_s.alert_cooldown_mins * 60000;
-    if (_battery_low_count >= 2 && uptime_millis >= _next_battery_alert) {
-      sprintf(texts[n++], "ALERT battery low %u.%02uV", batt_mv / 1000, (batt_mv % 1000) / 10);
+    const StatsHistorySlot* s0 = stats.getSlot(0);
+    const StatsHistorySlot* s1 = stats.getSlot(1);
+
+    // battery: the median reading below the limit in the newest 2 slots (0: no readings, eg. no battery sensing)
+    if (_s.alert_battery > 0 && s0 != nullptr && s1 != nullptr && isBatteryLow(s0->battery_mv)
+        && isBatteryLow(s1->battery_mv) && uptime_millis >= _next_battery_alert) {
+      sprintf(texts[n++], "ALERT battery low %u.%02uV (5m)", s0->battery_mv / 1000, (s0->battery_mv % 1000) / 10);
       _next_battery_alert = uptime_millis + cooldown;
     }
 
     // RX airtime: at or above the limit in the newest 2 slots
-    const StatsHistorySlot* s0 = stats.getSlot(0);
-    const StatsHistorySlot* s1 = stats.getSlot(1);
     if (_s.alert_airtime > 0 && s0 != nullptr && s1 != nullptr && s0->airtime_rx_percent >= _s.alert_airtime
         && s1->airtime_rx_percent >= _s.alert_airtime && uptime_millis >= _next_airtime_alert) {
       sprintf(texts[n++], "ALERT rx airtime high %u%% (5m)", s0->airtime_rx_percent);
@@ -230,6 +230,15 @@ public:
           _next_noisefloor_alert = uptime_millis + cooldown;
         }
       }
+    }
+
+    // primary missed: at least alert_primary_missed relays sent (no primary relayed them) in the newest 2 slots
+    if (_s.alert_primary_missed > 0 && backup_active && s0 != nullptr && s1 != nullptr
+        && s0->backup_pkts_sent >= _s.alert_primary_missed && s1->backup_pkts_sent >= _s.alert_primary_missed
+        && uptime_millis >= _next_primary_missed_alert) {
+      sprintf(texts[n++], "ALERT primary missed %u relays (5m), skipped %u", s0->backup_pkts_sent,
+              s0->backup_pkts_skipped);
+      _next_primary_missed_alert = uptime_millis + cooldown;
     }
     return n;
   }
@@ -259,9 +268,9 @@ public:
         return true;
       }
       if (strcmp(key, "alerts") == 0) {
-        sprintf(reply, "> enabled=%d battery=%d noisefloor=%d airtime=%d cooldown=%d", _s.alerts_enabled,
-                _s.alert_battery, _s.alert_noisefloor,
-                _s.alert_airtime, _s.alert_cooldown_mins);
+        sprintf(reply, "> enabled=%d battery=%d noisefloor=%d airtime=%d primary.missed=%d cooldown=%d",
+                _s.alerts_enabled, _s.alert_battery, _s.alert_noisefloor, _s.alert_airtime, _s.alert_primary_missed,
+                _s.alert_cooldown_mins);
         return true;
       }
       if (!isOurs(key)) return false;
@@ -273,6 +282,11 @@ public:
   }
 
 private:
+  // true if a slot's median battery reading 'mv' (0: none) is below alerts.battery
+  bool isBatteryLow(uint16_t mv) const {
+    return mv > 0 && mv < _s.alert_battery * 100;
+  }
+
   // true if channel text ("<sender>: <msg>", 'len' chars, maybe not null-terminated) is 'report', or
   // 'report <node_name>' (not case-sensitive, then 'named')
   static bool isRequest(const char* t, size_t len, const char* node_name, bool& named) {
@@ -301,7 +315,8 @@ private:
   static const char* const* keys() {
     static const char* const k[] = { "reports.enabled", "reports.channel.key", "reports.channel.region",
                                      "reports.hops.max", "reports.cooldown", "alerts.enabled", "alerts.battery",
-                                     "alerts.noisefloor", "alerts.airtime", "alerts.cooldown", nullptr };
+                                     "alerts.noisefloor", "alerts.airtime", "alerts.primary.missed", "alerts.cooldown",
+                                     nullptr };
     return k;
   }
 
@@ -322,6 +337,7 @@ private:
     _s.alert_battery = 34;
     _s.alert_noisefloor = 10;
     _s.alert_airtime = 25;
+    _s.alert_primary_missed = 24;
     _s.alert_cooldown_mins = 60;
     makeChannel();
   }
@@ -379,6 +395,8 @@ private:
       return setNumberOrOff(value, 3, 40, _s.alert_noisefloor);
     } else if (isKey(config, key_len, "alerts.airtime")) {
       return setNumberOrOff(value, 1, 100, _s.alert_airtime);
+    } else if (isKey(config, key_len, "alerts.primary.missed")) {
+      return setNumberOrOff(value, 1, 255, _s.alert_primary_missed);
     } else if (isKey(config, key_len, "alerts.cooldown")) {
       return setNumber16(value, 15, 1440, _s.alert_cooldown_mins);
     }
@@ -399,6 +417,7 @@ private:
     if (strcmp(key, "alerts.battery") == 0) return sprintf(dest, "%d", _s.alert_battery);
     if (strcmp(key, "alerts.noisefloor") == 0) return sprintf(dest, "%d", _s.alert_noisefloor);
     if (strcmp(key, "alerts.airtime") == 0) return sprintf(dest, "%d", _s.alert_airtime);
+    if (strcmp(key, "alerts.primary.missed") == 0) return sprintf(dest, "%d", _s.alert_primary_missed);
     if (strcmp(key, "alerts.cooldown") == 0) return sprintf(dest, "%d", _s.alert_cooldown_mins);
     return -1;
   }

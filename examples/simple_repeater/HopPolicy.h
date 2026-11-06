@@ -261,7 +261,7 @@ public:
         n = addValue(reply, n, i, false, more);
       }
       if (n == 0 && more == 0) {
-        strcpy(reply, "none");
+        strcpy(reply, "no limits");
       } else if (more > 0) {
         sprintf(&reply[n], " +%d more", more);
       }

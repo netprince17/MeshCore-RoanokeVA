@@ -468,6 +468,15 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
 #endif
     return false;
   }
+  // backup mode: a primary has already been heard relaying it. After the firewall, so its tracking still
+  // sees these packets.
+  if (primaries.wasRelayedByPrimary(packet)) {
+    MESH_DEBUG_PRINTLN("allowPacketForward: FLOOD packet already relayed by a primary");
+#if !defined(STM32_PLATFORM)
+    stats_history.countBackupPktSkipped();
+#endif
+    return false;
+  }
   return true;
 }
 
@@ -493,6 +502,24 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 #if !defined(STM32_PLATFORM)
   stats_history.countRx(pkt->getRawLength());
 #endif
+
+  // backup mode: a primary relayed this packet, so our relay of it still in the send queue is cancelled
+  uint8_t hash[MAX_HASH_SIZE];
+  if (primaries.notePrimaryRelay(pkt, hash)) {
+    uint8_t queued[MAX_HASH_SIZE];
+    for (int i = 0; i < _mgr->getOutboundTotal(); i++) {
+      mesh::Packet* q = _mgr->getOutboundByIdx(i);
+      if (!PrimaryRepeater::isOurRelay(q, self_id)) continue;
+      q->calculatePacketHash(queued);
+      if (memcmp(queued, hash, MAX_HASH_SIZE) != 0) continue;
+      releasePacket(_mgr->removeOutboundByIdx(i));
+      primaries.countCancelled(hash);
+#if !defined(STM32_PLATFORM)
+      stats_history.countBackupPktSkipped();
+#endif
+      break;
+    }
+  }
 
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 1) {
@@ -522,6 +549,8 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #if !defined(STM32_PLATFORM)
   stats_history.countTx(pkt->getRawLength());   // 'len' leaves out a scoped flood's transport codes
+  // backup mode: a relay that went out, so no primary was heard relaying it
+  if (primaries.isActive() && PrimaryRepeater::isOurRelay(pkt, self_id)) stats_history.countBackupPktSent();
 #endif
 
 #ifdef WITH_BRIDGE
@@ -566,8 +595,10 @@ int MyMesh::calcRxDelay(float score, uint32_t air_time) const {
 }
 
 uint32_t MyMesh::getRetransmitDelay(const mesh::Packet *packet) {
-  uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.tx_delay_factor);
-  return getRNG()->nextInt(0, 5*t + 1);
+  uint32_t airtime = _radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2);
+  uint32_t t = (airtime * _prefs.tx_delay_factor);
+  // backup mode: our flood-routed relays also wait 'primary holdoff' times the airtime
+  return getRNG()->nextInt(0, 5*t + 1) + primaries.getHoldoff(packet, self_id, airtime);
 }
 uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
   uint32_t t = (_radio->getEstAirtimeFor(packet->getPathByteLen() + packet->payload_len + 2) * _prefs.direct_tx_delay_factor);
@@ -990,6 +1021,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if !defined(STM32_PLATFORM)
   reports.begin(_fs);
 #endif
+  primaries.begin(_fs);
 
   // establish default-scope
   {
@@ -1382,6 +1414,14 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
 #if !defined(STM32_PLATFORM)
   } else if (reports.handleCommand(command, reply)) {   // set / get reports.* and alerts.*
 #endif
+  } else if (isTableCommand(command, "primary")) {   // backup mode
+    if (strcmp(command, "primary show") != 0) {
+      primaries.handleCommand(&command[7], reply);
+    } else if (sender_timestamp == 0) {
+      primaries.printAll(Serial);
+    } else {
+      strcpy(reply, "Err - primary show: serial console only, use primary show<p>");
+    }
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
@@ -1435,6 +1475,10 @@ void MyMesh::loop() {
   if (stats_history.isNoisefloorSampleDue(uptime_millis) && radio_driver.isInRecvMode()) {
     stats_history.addNoisefloorSample(radio_driver.getCurrentRSSI());
   }
+  // battery: a reading every 30 s while listening, so not during a send (when the battery sags)
+  if (stats_history.isBatterySampleDue(uptime_millis) && radio_driver.isInRecvMode()) {
+    stats_history.addBatterySample(board.getBattMilliVolts());
+  }
   stats_history.noteSendQueue(_mgr->getOutboundTotal());
   StatsHistoryRunningTotals totals;
   totals.airtime_rx_ms = getReceiveAirTime();
@@ -1442,8 +1486,8 @@ void MyMesh::loop() {
   totals.rx_errors = radio_driver.getPacketsRecvErrors();
   totals.flood_dups = ((SimpleMeshTables *)getTables())->getNumFloodDups();
   if (stats_history.update(uptime_millis, totals)) {   // a slot was stored: check the alerts
-    char alerts[3][64];
-    int n = reports.checkAlerts(uptime_millis, board.getBattMilliVolts(), stats_history, alerts);
+    char alerts[REPORTS_MAX_ALERTS][64];
+    int n = reports.checkAlerts(uptime_millis, primaries.isActive(), stats_history, alerts);
     for (int i = 0; i < n; i++) sendReportText(alerts[i], 0);
   }
 #endif

@@ -12,6 +12,7 @@ Per slot:
 | packets / bytes sent | every packet sent (forwarded or our own), bytes as on air |
 | RX / TX airtime | whole percent of the slot, rounded to nearest. TX is measured; RX is estimated from decoded packets, so it's a lower bound on how busy the channel is |
 | noise floor | median of the slot's RSSI readings (one every 5 s while the radio is listening), dBm. Packets are short, so it follows the background noise. It shifts if the RX gain or frequency changes |
+| battery | median of the slot's battery readings (one every 30 s while the radio is listening, so not during a send, when the battery sags). None if the board can't measure it |
 | firewall drops | packets the firewall dropped (none while `fw.enabled` is 0) |
 | RX errors | packets the radio heard but couldn't read, eg. CRC failures from collisions or interference |
 | flood dups | flood-routed packets heard again after they were already seen: how many other repeaters around here pass the same traffic |
@@ -20,6 +21,8 @@ Per slot:
 | forced | sends forced out after the channel stayed busy for 4 s |
 | holds | times sending was held back because the airtime budget (`set dutycycle`) was used up, one per hold until the next send |
 | looped | packets dropped by loop detection (`loop.detect`) |
+| skipped | relays skipped in [repeater backup mode](backup_repeater.md), because a primary relayed the packet |
+| sent | relays sent in repeater backup mode, because no primary was heard relaying the packet |
 
 Counts top out at 65535 per slot (255 for looped and the send queue). 
 
@@ -52,10 +55,12 @@ rx: 210p/14560b
 tx: 98p/6720b
 arr/art: 2%/1%
 nf: -112
+bat: 4.05V
 fw/err/dup: 37/5/88
 sq: 6
 dfr/frc/hld: 12/0/0
 lp: 1
+skp/snt: 0/0
 ```
 
 Replies are cut off at 160 characters; only extreme 24 h totals could reach that.
@@ -65,12 +70,14 @@ Replies are cut off at 160 characters; only extreme 24 h totals could reach that
 | `rx` / `tx` | packets / bytes received / sent |
 | `arr` / `art` | RX / TX airtime % |
 | `nf` | noise floor, dBm (`-` if no reading) |
+| `bat` | battery, the average of the slots' medians (`-` if no reading) |
 | `fw` / `err` / `dup` | firewall drops / RX errors / flood dups |
 | `sq` | send queue peak |
 | `dfr` | sends deferred |
 | `frc` | sends forced |
 | `hld` | duty cycle holds |
 | `lp` | looped packets dropped |
+| `skp` / `snt` | relays skipped for a primary / sent because no primary relayed them (repeater backup mode) |
 
 ## Files
 

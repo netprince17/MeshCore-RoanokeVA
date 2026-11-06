@@ -39,9 +39,10 @@ While alerts are on (`alerts.enabled`), the repeater posts an alert when a readi
 
 | Alert | Out of range when | Message |
 |---|---|---|
-| battery | below `alerts.battery` / 10 V | `ALERT battery low 3.38V` |
+| battery | the slot's median battery reading (one every 30 s while the radio is listening) below `alerts.battery` / 10 V | `ALERT battery low 3.38V (5m)` |
 | airtime | RX airtime at or above `alerts.airtime` % | `ALERT rx airtime high 31% (5m)` |
 | noise floor | at least `alerts.noisefloor` dB above the average of the earlier history (from 1 hour of history) | `ALERT noise floor up 12dB: -100dBm (24h avg -112dBm)` |
+| primary missed | at least `alerts.primary.missed` relays sent because no primary relayed them, while [repeater backup mode](backup_repeater.md) is on | `ALERT primary missed 41 relays (5m), skipped 3` |
 
 ## How replies and alerts are sent
 
@@ -64,6 +65,7 @@ To cap how far they're relayed, the path is pre-filled with dummy `000000` 3-byt
 | `alerts.battery` | `34` | tenths of a volt (34 = 3.4 V), 10-50, `0` = off |
 | `alerts.noisefloor` | `10` | dB, 3-40, `0` = off |
 | `alerts.airtime` | `25` | RX airtime %, 1-100, `0` = off |
+| `alerts.primary.missed` | `24` | relays per 5 minutes, 1-255, `0` = off |
 | `alerts.cooldown` | `60` | 15-1440 minutes between repeats of the same alert |
 
 For a hashtag channel, the key is the first 16 bytes of `sha256("#name")`:

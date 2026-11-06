@@ -39,6 +39,7 @@
 #include "FirewallTable.h"
 #include "StatsHistory.h"
 #include "Reports.h"
+#include "PrimaryRepeater.h"
 
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
@@ -104,6 +105,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   TransportKey default_scope;
   RateLimiter discover_limiter, anon_limiter;
   FirewallTable firewall;         // rules deciding which received packets are forwarded
+  PrimaryRepeater primaries;      // backup mode: relays held back, skipped once a primary relays them
 #if !defined(STM32_PLATFORM)
   StatsHistory stats_history;     // repeater stats, 5-minute slots for 24 hours (RAM only)
   Reports reports;                // replies and alerts on the reports channel

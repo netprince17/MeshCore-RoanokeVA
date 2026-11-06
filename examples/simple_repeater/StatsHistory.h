@@ -13,6 +13,8 @@
 //               busy the channel is, TX is measured.
 //   noisefloor: the median of the slot's RSSI readings (dBm), taken while the radio is listening. Packets are
 //               short, so it follows the background noise. Readings shift if the RX gain or frequency changes.
+//   battery:    the median of the slot's battery readings (mV), one every 30 s while the radio is listening (so not
+//               during a send, when the battery sags). 0 if there's none (eg. the board can't measure it).
 //   firewall:   packets the firewall dropped.
 //   rx errors:  packets the radio heard but couldn't read (eg. CRC failures), from its running total.
 //   flood dups: flood-routed packets heard again after they were already seen, from the packet tables' running total.
@@ -21,6 +23,8 @@
 //               too long, and holds: times sending was held back because the airtime budget (duty cycle) was
 //               used up (one per hold, until the next send). From Dispatcher::checkSend().
 //   looped:     packets dropped by loop detection.
+//   skipped:    relays skipped in backup mode, because a primary relayed the packet.
+//   sent:       relays sent in backup mode, because no primary was heard relaying the packet.
 //               Counts stop at their field's maximum (65535, or 255 for looped and the send queue) instead of
 //               wrapping, so the maximum means "at least".
 
@@ -31,6 +35,11 @@
 #define STATS_HISTORY_NOISEFLOOR_SAMPLE_MILLIS  5000
 #define STATS_HISTORY_NOISEFLOOR_SAMPLES        (STATS_HISTORY_SLOT_MILLIS / STATS_HISTORY_NOISEFLOOR_SAMPLE_MILLIS)
 #define STATS_HISTORY_NOISEFLOOR_NONE           -128   // StatsHistorySlot::noisefloor_dbm: no reading in the slot
+
+// battery: a reading every 30 s while the radio is listening, up to 10 per slot. 1 V or less is no battery sensing.
+#define STATS_HISTORY_BATTERY_SAMPLE_MILLIS     30000
+#define STATS_HISTORY_BATTERY_SAMPLES           (STATS_HISTORY_SLOT_MILLIS / STATS_HISTORY_BATTERY_SAMPLE_MILLIS)
+#define STATS_HISTORY_BATTERY_MIN_MV            1000
 
 #define STATS_HISTORY_COUNT_MAX                 65535  // counts stop here
 #define STATS_HISTORY_COUNT8_MAX                255    // 1-byte counts (looped, send queue) stop here
@@ -51,13 +60,16 @@ struct StatsHistorySlot {
   uint16_t tx_deferred;         // sends put off, channel busy (one per retry)
   uint16_t tx_forced;           // sends forced, channel busy too long
   uint16_t tx_budget_holds;     // times sending was held back, airtime budget used up
+  uint16_t backup_pkts_skipped; // relays skipped, a primary relayed the packet (backup mode)
+  uint16_t backup_pkts_sent;    // relays sent, no primary relayed the packet (backup mode)
+  uint16_t battery_mv;          // median battery reading (mV), 0 = none
   uint8_t  airtime_rx_percent;  // RX airtime %
   uint8_t  airtime_tx_percent;  // TX airtime %
   int8_t   noisefloor_dbm;      // median RSSI (dBm), or STATS_HISTORY_NOISEFLOOR_NONE
   uint8_t  send_queue_peak;     // most packets waiting to be sent
   uint8_t  looped;              // packets dropped by loop detection
 };
-static_assert(sizeof(StatsHistorySlot) == 26, "stats history slot must stay 26 bytes (25 + 1 padding)");
+static_assert(sizeof(StatsHistorySlot) == 32, "stats history slot must stay 32 bytes (31 + 1 padding)");
 
 // Running totals from the Dispatcher, radio and packet tables, read when each slot ends (MyMesh::loop())
 struct StatsHistoryRunningTotals {
@@ -84,16 +96,22 @@ class StatsHistory {
   uint32_t _tx_budget_holds_now;
   bool _tx_budget_held;                                 // sending is held back now (counted once, until a send)
   uint32_t _looped_now;                                 // its looped packets so far
+  uint32_t _backup_pkts_skipped_now;                    // its relays skipped for a primary so far
+  uint32_t _backup_pkts_sent_now;                       // its relays sent, no primary relayed them, so far
   int8_t _noisefloor_samples[STATS_HISTORY_NOISEFLOOR_SAMPLES];   // its noise floor readings so far
   int _noisefloor_sample_count;
   uint64_t _next_noisefloor_sample_millis;              // uptime when the next noise floor reading is due
+  uint16_t _battery_samples[STATS_HISTORY_BATTERY_SAMPLES];   // its battery readings so far (mV)
+  int _battery_sample_count;
+  uint64_t _next_battery_sample_millis;                 // uptime when the next battery reading is due
 
 public:
   StatsHistory(): _slots(), _newest(STATS_HISTORY_SLOTS - 1), _count(0), _next_slot_millis(0), _at_start(),
                   _rx_packets_now(0), _tx_packets_now(0), _rx_bytes_now(0), _tx_bytes_now(0), _fw_drops_now(0),
                   _send_queue_peak_now(0), _tx_deferred_now(0), _tx_forced_now(0), _tx_budget_holds_now(0),
-                  _tx_budget_held(false), _looped_now(0), _noisefloor_sample_count(0),
-                  _next_noisefloor_sample_millis(0) { }
+                  _tx_budget_held(false), _looped_now(0), _backup_pkts_skipped_now(0),
+                  _backup_pkts_sent_now(0), _noisefloor_sample_count(0),
+                  _next_noisefloor_sample_millis(0), _battery_sample_count(0), _next_battery_sample_millis(0) { }
 
   // From MyMesh::loop(): when a slot's 5 minutes are up, stores its readings and starts the next slot (then returns
   // true). The first call only starts the first slot.
@@ -125,6 +143,10 @@ public:
     slot.noisefloor_dbm = noisefloorMedian();
     _noisefloor_sample_count = 0;
 
+    // battery: the median of the slot's readings
+    slot.battery_mv = batteryMedian();
+    _battery_sample_count = 0;
+
     // firewall drops, rx errors, flood dups, send queue peak
     slot.fw_drops = capped(_fw_drops_now, STATS_HISTORY_COUNT_MAX);
     slot.rx_errors = capped(growth(totals.rx_errors, _at_start.rx_errors), STATS_HISTORY_COUNT_MAX);
@@ -139,6 +161,11 @@ public:
     slot.tx_budget_holds = capped(_tx_budget_holds_now, STATS_HISTORY_COUNT_MAX);
     slot.looped = capped(_looped_now, STATS_HISTORY_COUNT8_MAX);
     _tx_deferred_now = _tx_forced_now = _tx_budget_holds_now = _looped_now = 0;
+
+    // relays skipped for a primary, and sent because no primary relayed them (backup mode)
+    slot.backup_pkts_skipped = capped(_backup_pkts_skipped_now, STATS_HISTORY_COUNT_MAX);
+    slot.backup_pkts_sent = capped(_backup_pkts_sent_now, STATS_HISTORY_COUNT_MAX);
+    _backup_pkts_skipped_now = _backup_pkts_sent_now = 0;
 
     _at_start = totals;
     _next_slot_millis += STATS_HISTORY_SLOT_MILLIS;   // exactly one slot on, so slots don't drift
@@ -188,6 +215,18 @@ public:
     if (_next_slot_millis != 0) _looped_now++;
   }
 
+  // From MyMesh::logRx() / allowPacketForward(): counts a relay skipped because a primary relayed the packet
+  // (backup mode)
+  void countBackupPktSkipped() {
+    if (_next_slot_millis != 0) _backup_pkts_skipped_now++;
+  }
+
+  // From MyMesh::logTx(): counts a relay sent because no primary was heard relaying the packet
+  // (backup mode)
+  void countBackupPktSent() {
+    if (_next_slot_millis != 0) _backup_pkts_sent_now++;
+  }
+
   // From MyMesh::loop(): true when the next noise floor reading is due (every
   // STATS_HISTORY_NOISEFLOOR_SAMPLE_MILLIS)
   bool isNoisefloorSampleDue(uint64_t uptime_millis) {
@@ -207,6 +246,24 @@ public:
     if (rssi < -127) rssi = -127;
     if (rssi > 0) rssi = 0;
     _noisefloor_samples[_noisefloor_sample_count++] = (int8_t)floorf(rssi + 0.5f);
+  }
+
+  // From MyMesh::loop(): true when the next battery reading is due (every STATS_HISTORY_BATTERY_SAMPLE_MILLIS)
+  bool isBatterySampleDue(uint64_t uptime_millis) {
+    if (uptime_millis < _next_battery_sample_millis) return false;
+    _next_battery_sample_millis += STATS_HISTORY_BATTERY_SAMPLE_MILLIS;
+    if (_next_battery_sample_millis <= uptime_millis) {   // fell behind: carry on from now, no catching up
+      _next_battery_sample_millis = uptime_millis + STATS_HISTORY_BATTERY_SAMPLE_MILLIS;
+    }
+    return true;
+  }
+
+  // Adds a battery reading (mV) for the slot being measured. STATS_HISTORY_BATTERY_MIN_MV or less (no battery
+  // sensing), a reading before the first slot starts, or one past STATS_HISTORY_BATTERY_SAMPLES is dropped.
+  void addBatterySample(uint16_t mv) {
+    if (mv <= STATS_HISTORY_BATTERY_MIN_MV || _next_slot_millis == 0) return;
+    if (_battery_sample_count >= STATS_HISTORY_BATTERY_SAMPLES) return;
+    _battery_samples[_battery_sample_count++] = mv;
   }
 
   // slots holding data
@@ -276,9 +333,12 @@ public:
     uint32_t airtime_rx_sum, airtime_tx_sum;               // percentages added up
     int32_t noisefloor_sum;                                // readings added up
     int noisefloor_slots;                                  // slots with a reading
+    uint32_t battery_sum;                                  // battery medians added up (mV)
+    int battery_slots;                                     // slots with a battery reading
     uint32_t fw_drops, rx_errors, flood_dups;
     int send_queue_peak;                                   // the highest
     uint32_t tx_deferred, tx_forced, tx_budget_holds, looped;
+    uint32_t backup_pkts_skipped, backup_pkts_sent;
   };
 
   // Adds up the newest 'n' slots (as far as there are slots) into 't'.
@@ -312,6 +372,10 @@ private:
         t.noisefloor_sum += s->noisefloor_dbm;
         t.noisefloor_slots++;
       }
+      if (s->battery_mv > 0) {
+        t.battery_sum += s->battery_mv;
+        t.battery_slots++;
+      }
       t.fw_drops += s->fw_drops;
       t.rx_errors += s->rx_errors;
       t.flood_dups += s->flood_dups;
@@ -320,6 +384,8 @@ private:
       t.tx_forced += s->tx_forced;
       t.tx_budget_holds += s->tx_budget_holds;
       t.looped += s->looped;
+      t.backup_pkts_skipped += s->backup_pkts_skipped;
+      t.backup_pkts_sent += s->backup_pkts_sent;
     }
   }
 
@@ -343,22 +409,46 @@ private:
   // Writes every stat of 't', related ones on one line ('stats <n>' / 'stats +<n>'). At most
   // STATS_HISTORY_REPLY_SIZE (cut off there).
   static void formatTotals(const StatsHistoryTotals& t, char* reply) {
-    char nf[8];
+    char nf[8], bat[12];
     formatNoisefloor(nf, t);
+    formatBattery(bat, t);
     snprintf(reply, STATS_HISTORY_REPLY_SIZE,
-             "rx: %lup/%lub\ntx: %lup/%lub\narr/art: %d%%/%d%%\nnf: %s\nfw/err/dup: %lu/%lu/%lu\nsq: %d"
-             "\ndfr/frc/hld: %lu/%lu/%lu\nlp: %lu",
+             "rx: %lup/%lub\ntx: %lup/%lub\narr/art: %d%%/%d%%\nnf: %s\nbat: %s\nfw/err/dup: %lu/%lu/%lu\nsq: %d"
+             "\ndfr/frc/hld: %lu/%lu/%lu\nlp: %lu\nskp/snt: %lu/%lu",
              (unsigned long)t.rx_packets, (unsigned long)t.rx_bytes, (unsigned long)t.tx_packets,
-             (unsigned long)t.tx_bytes, average(t.airtime_rx_sum, t.slots), average(t.airtime_tx_sum, t.slots), nf,
+             (unsigned long)t.tx_bytes, average(t.airtime_rx_sum, t.slots), average(t.airtime_tx_sum, t.slots), nf, bat,
              (unsigned long)t.fw_drops, (unsigned long)t.rx_errors, (unsigned long)t.flood_dups, t.send_queue_peak,
              (unsigned long)t.tx_deferred, (unsigned long)t.tx_forced, (unsigned long)t.tx_budget_holds,
-             (unsigned long)t.looped);
+             (unsigned long)t.looped, (unsigned long)t.backup_pkts_skipped,
+             (unsigned long)t.backup_pkts_sent);
   }
 
   // Writes the average noise floor of 't' (dBm), or '-' if no slot had a reading. Returns the length.
   static int formatNoisefloor(char* dest, const StatsHistoryTotals& t) {
     if (t.noisefloor_slots == 0) return sprintf(dest, "-");
     return sprintf(dest, "%d", average(t.noisefloor_sum, t.noisefloor_slots));
+  }
+
+  // Writes the average battery reading of 't' ("3.98V"), or '-' if no slot had one. Returns the length.
+  static int formatBattery(char* dest, const StatsHistoryTotals& t) {
+    if (t.battery_slots == 0) return sprintf(dest, "-");
+    uint32_t mv = (t.battery_sum + t.battery_slots / 2) / t.battery_slots;
+    return sprintf(dest, "%lu.%02luV", (unsigned long)(mv / 1000), (unsigned long)((mv % 1000) / 10));
+  }
+
+  // median of the slot's battery readings (sorts them), or 0 if there are none
+  uint16_t batteryMedian() {
+    if (_battery_sample_count == 0) return 0;
+    for (int i = 1; i < _battery_sample_count; i++) {   // insertion sort, at most STATS_HISTORY_BATTERY_SAMPLES
+      uint16_t v = _battery_samples[i];
+      int j = i - 1;
+      while (j >= 0 && _battery_samples[j] > v) {
+        _battery_samples[j + 1] = _battery_samples[j];
+        j--;
+      }
+      _battery_samples[j + 1] = v;
+    }
+    return _battery_samples[_battery_sample_count / 2];
   }
 
   // median of the slot's noise floor readings (sorts them), or STATS_HISTORY_NOISEFLOOR_NONE if there are none

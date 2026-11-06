@@ -797,8 +797,10 @@ public:
         n = addLine(reply, n, item, len, more);
         shown++;
       }
-      if (shown == 0 && more == 0) {
-        strcpy(reply, "none");
+      if (shown == 0 && more == 0) {   // the page's slot range, eg. "no rules 6-11"
+        int last = first + FIREWALL_PAGE_SLOTS - 1;
+        if (last >= FIREWALL_MAX_RULES) last = FIREWALL_MAX_RULES - 1;
+        sprintf(reply, "no rules %d-%d", first, last);
       } else if (more > 0) {
         sprintf(&reply[n], "\n+%d more", more);
       }
