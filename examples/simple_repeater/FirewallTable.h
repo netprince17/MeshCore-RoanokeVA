@@ -34,7 +34,7 @@
 #define FIREWALL_LOOKUP_NONE               0
 #define FIREWALL_LOOKUP_ROUTE_POLICY       1      // routepol: the packet's path must match one of its routes
 #define FIREWALL_LOOKUP_HOP_POLICY         2      // hoppol: the packet must be over a hop limit that applies to it
-#define FIREWALL_LOOKUP_SENDER_TRACKING    3      // sendtrk: the sender (adverts, anon requests) is over lb / lr
+#define FIREWALL_LOOKUP_SENDER_TRACKING    3      // sendtrk: the sender is over lb / lr (adv, anonreq, req, resp, txt, path)
 #define FIREWALL_LOOKUP_CHANNEL_TRACKING   4      // chantrk: the channel (channel messages) is over lb / lr
 #define FIREWALL_LOOKUP_PACKET_TRACKING    5      // pkttrk: slot ls (any packet the rule matches) is over lb / lr
 
@@ -48,6 +48,7 @@
 
 // CLI (handleCommand())
 #define FIREWALL_PAGE_SLOTS    6     // slots per 'fw show<p>' page (more don't fit a reply with large match counts)
+#define FIREWALL_SENDER_PAGE_RULES 4 // sendtrk rules per 'fw senders<p>' page
 #define FIREWALL_COMMAND_MAX   160   // longest 'fw' command
 // rule field keys, in format() order, each followed by a space
 #define FIREWALL_FIELD_KEYS    "nm pt hp rb rt ch rg lb lr ls tl ac "
@@ -62,14 +63,17 @@ static const char* const FIREWALL_DEFAULT_RULES[] = {
   "nm:hoppol                          tl:hoppol                     ac:drop",
 
   // track and restrict advertisements
-  "nm:advlm1   pt:adv     hp:0-4      tl:sendtrk       lb:20 lr:1h  ac:drop",
-  "nm:advlm2   pt:adv     hp:5-8      tl:sendtrk       lb:10 lr:12h ac:drop",
+  "nm:advlm1   pt:adv     hp:0-4      tl:sendtrk       lb:10 lr:30m ac:drop",
+  "nm:advlm2   pt:adv     hp:5-8      tl:sendtrk       lb:10 lr:60m ac:drop",
   "nm:advlm3   pt:adv     hp:9-63     tl:sendtrk       lb:1  lr:3d  ac:drop",
 
-  // track and restrict anonymous requests
-  "nm:anrqlm1  pt:anonreq hp:0-4      tl:sendtrk       lb:20 lr:1h  ac:drop",
-  "nm:anrqlm2  pt:anonreq hp:5-8      tl:sendtrk       lb:10 lr:12h ac:drop",
-  "nm:anrqlm3  pt:anonreq hp:9-63     tl:sendtrk       lb:6  lr:3d  ac:drop",
+  // track and restrict flooded anonymous requests
+  "nm:anrqlm1  pt:anonreq hp:0-4      tl:sendtrk       lb:10 lr:30m ac:drop",
+  "nm:anrqlm2  pt:anonreq hp:5-8      tl:sendtrk       lb:10 lr:60m ac:drop",
+
+  // track and restrict flooded requests
+  "nm:reqlm1   pt:req     hp:0-4     tl:sendtrk        lb:5 lr:30m ac:drop",
+  "nm:reqlm2   pt:req     hp:5-8     tl:sendtrk        lb:5 lr:60m ac:drop",
 
   // wardriving should be stopped locally
   "nm:wrdrvlm  pt:grptxt  hp:3-63 ch:81                             ac:drop",
@@ -79,9 +83,8 @@ static const char* const FIREWALL_DEFAULT_RULES[] = {
   "nm:chanlm2             hp:9-63     tl:chantrk       lb:6  lr:15s ac:drop",
 
   // total cap on distant tracking tables (chantrk and sendtrk can be abused)
-  "nm:chandos1 pt:grptxt  hp:9-63     tl:pkttrk   ls:0 lb:10 lr:6s  ac:drop",
-  "nm:senddos1 pt:adv     hp:9-63     tl:pkttrk   ls:1 lb:8 lr:15s  ac:drop",
-  "nm:senddos2 pt:anonreq hp:9-63     tl:pkttrk   ls:1 lb:8 lr:15s  ac:drop",
+  "nm:chandos1 pt:grptxt  hp:9-63     tl:pkttrk        ls:0 lb:10 lr:6s ac:drop",
+  "nm:senddos1 pt:adv     hp:9-63     tl:pkttrk        ls:1 lb:8  lr:5s ac:drop",
 
   // accept remaining traffic
   "nm:acptfld  rt:flood                                             ac:fwd",
@@ -116,6 +119,7 @@ struct FirewallRule {
   uint32_t match_count;            // times this rule has taken action (runtime counter, not a setting)
 };
 static_assert(sizeof(FirewallRule) == 32, "firewall rule must stay 32 bytes");
+static_assert(FIREWALL_MAX_RULES <= SENDER_TRACKING_RULE_MASK + 1, "sender tracking keeps rule slots in 7 bits");
 
 class FirewallTable : private TableCli {
   FirewallRule _rules[FIREWALL_MAX_RULES];   // rules in slot order, empty slots (param_set 0) anywhere
@@ -289,8 +293,8 @@ public:
         } else if (r->table_lookup == FIREWALL_LOOKUP_HOP_POLICY) {    // over a hop limit that applies to it
           hop_entry = _hop_policy.findMatch(packet, hop_count);
           if (hop_entry < 0) continue;
-        } else if (r->table_lookup == FIREWALL_LOOKUP_SENDER_TRACKING) {   // sender over lb / lr
-          if (!_senders.isOverLimit(packet, uptime_millis, r->limit_recovery, r->limit_burst)) continue;
+        } else if (r->table_lookup == FIREWALL_LOOKUP_SENDER_TRACKING) {   // sender over lb / lr (this rule's clock)
+          if (!_senders.isOverLimit(packet, i, uptime_millis, r->limit_recovery, r->limit_burst)) continue;
         } else if (r->table_lookup == FIREWALL_LOOKUP_CHANNEL_TRACKING) {  // channel over lb / lr
           if (!_channels.isOverLimit(packet, uptime_millis, r->limit_recovery, r->limit_burst)) continue;
         } else if (r->table_lookup == FIREWALL_LOOKUP_PACKET_TRACKING) {   // slot ls over lb / lr
@@ -483,6 +487,7 @@ public:
     if (r.param_set == 0) {
       if (any_field) return "rule needs a match or check field";   // eg. only nm / ac
       _rules[number] = FirewallRule();   // empty config: empty slot
+      _senders.forgetRule(number);
       return nullptr;
     }
     if (from_empty && !has_action) return "ac needed, drop or fwd";
@@ -508,7 +513,10 @@ public:
       return err;
     }
 
-    if (reset) r.match_count = 0;
+    if (reset) {   // a new rule: its sender clocks start over (field edits keep them)
+      r.match_count = 0;
+      _senders.forgetRule(number);
+    }
     _rules[number] = r;
     return nullptr;
   }
@@ -523,9 +531,10 @@ public:
     }
   }
 
-  // empties every slot
+  // empties every slot (and forgets every sender clock)
   void clear() {
     for (int i = 0; i < FIREWALL_MAX_RULES; i++) _rules[i] = FirewallRule();
+    _senders.clear();
   }
 
   // number of slots holding a rule
@@ -689,8 +698,9 @@ public:
   //   fw collapse <n>        removes empty slot n, moving all later slots up
   //   fw clear | setdefault | save | reload   (setdefault isn't saved until 'fw save')
   //   fw unsave              removes the saved rules (the current ones stay): the defaults load at boot
-  //   fw senders             the sender tracking table (tl:sendtrk): senders still tracked (limits in effect), and
-  //                          of those, the ones with adverts / anon requests. 'uptime_millis': now.
+  //   fw senders[<p>]        the sender tracking table (tl:sendtrk): senders still tracked (limits in effect), then
+  //                          page p (default 1) of the sendtrk rules: "slot name: tracked (over)", over: senders
+  //                          whose next packet is over the rule's limit. 'uptime_millis': now.
   void handleCommand(const char* command, char* reply, bool enabled, uint64_t uptime_millis) {
     while (*command == ' ') command++;
 
@@ -752,13 +762,16 @@ public:
         if (_skipped > 0) sprintf(&reply[n], ", %d skipped (%s)", _skipped, _skipped_note);
       }
 
-    } else if (strcmp(command, "senders") == 0) {   // the sender tracking table
-      int tracking, adverts, anonreqs;
-      _senders.countTracking(uptime_millis, tracking, adverts, anonreqs);
-      int n = sprintf(reply, "tracking: %d/%d", tracking, SENDER_TRACKING_SIZE);
-      // all tracked: a new sender replaces the one closest to fully recovered, so its limits are lost early
-      if (tracking >= SENDER_TRACKING_SIZE) n += sprintf(&reply[n], " (overwriting)");
-      sprintf(&reply[n], "\nadverts: %d\nanonreqs: %d", adverts, anonreqs);
+    } else if (memcmp(command, "senders", 7) == 0) {   // the sender tracking table, per sendtrk rule
+      const char* p = &command[7];
+      int page = 1;
+      if (*p != 0) page = parseSlotNumber(p);
+      if (page < 1 || *p != 0) {
+        strcpy(reply, "Err - use: fw senders[<p>]");
+        return;
+      }
+      _senders.recover(uptime_millis);   // clocks long behind now are fully recovered, not shown as ahead
+      formatSenders(page, uptime_millis, reply);
 
     } else if (strcmp(command, "unsave") == 0) {   // remove the saved rules, so the defaults load at boot
       if (_fs == nullptr || !_fs->exists(FIREWALL_FILE)) {
@@ -816,7 +829,7 @@ public:
       const char* p = command;
       int number = parseSlotNumber(p);
       if (number < 0 || number >= FIREWALL_MAX_RULES) {
-        sprintf(reply, "Err - use: fw [<0-%d> [-] [key:value|key ...]]|show<p>|insert <n>|collapse <n>|clear|setdefault|save|reload|unsave|senders",
+        sprintf(reply, "Err - use: fw [<0-%d> [-] [key:value|key ...]]|show<p>|insert <n>|collapse <n>|clear|setdefault|save|reload|unsave|senders<p>",
                 FIREWALL_MAX_RULES - 1);
         return;
       }
@@ -922,6 +935,66 @@ private:
     return memcmp(command, word, len) == 0 && (command[len] == 0 || command[len] == ' ');
   }
 
+  // true if rule 'r' checks the sender tracking table (tl:sendtrk)
+  static bool isSenderTracking(const FirewallRule* r) {
+    return (r->param_set & FIREWALL_HAS_TABLE_LOOKUP) && r->table_lookup == FIREWALL_LOOKUP_SENDER_TRACKING;
+  }
+
+  // 'fw senders<p>': "senders: <tracked>/<size>" (records whose limits are still in effect), " (overwriting)" if
+  // they all are (a new sender then replaces the one closest to fully recovered, so its limits are lost early), then
+  // page 'page' of the sendtrk rules, "<slot> <name>: <tracked> (<over> over)", over: its next packet is over the
+  // rule's limit. "..." on its own line: a later page has rules.
+  void formatSenders(int page, uint64_t uptime_millis, char* reply) const {
+    int tracked[FIREWALL_MAX_RULES] = {};
+    int over[FIREWALL_MAX_RULES] = {};
+    int total = 0;
+    for (int i = 0; i < _senders.getCount(); i++) {
+      int rule, ahead;
+      _senders.getRecord(i, uptime_millis, rule, ahead);
+      if (ahead == 0 || rule >= FIREWALL_MAX_RULES) continue;   // fully recovered: no limit in effect
+      total++;
+      tracked[rule]++;
+      const FirewallRule* r = getRule(rule);
+      if (r == nullptr || !isSenderTracking(r)) continue;   // left over from an old rule, not shown
+      uint32_t lr = (r->limit_recovery + 59) / 60;          // whole minutes, as SenderTracking counts
+      if ((uint32_t)ahead + lr > (uint32_t)r->limit_burst * lr) over[rule]++;
+    }
+
+    int n = sprintf(reply, "senders: %d/%d", total, SENDER_TRACKING_SIZE);
+    if (total >= SENDER_TRACKING_SIZE) n += sprintf(&reply[n], " (overwriting)");
+
+    int first = (page - 1) * FIREWALL_SENDER_PAGE_RULES;   // index of the page's first sendtrk rule
+    int index = 0;
+    int shown = 0;
+    int more = 0;
+    bool later = false;
+    for (int i = 0; i < FIREWALL_MAX_RULES; i++) {
+      const FirewallRule* r = getRule(i);
+      if (r == nullptr || !isSenderTracking(r)) continue;
+      if (index++ < first) continue;
+      if (shown == FIREWALL_SENDER_PAGE_RULES) {
+        later = true;
+        break;
+      }
+      const char* name = r->name;
+      if (name[0] == 0) name = "?";
+      char item[40];
+      int len = sprintf(item, "%d %s: %d (%d over)", i, name, tracked[i], over[i]);
+      n = addLine(reply, n, item, len, more);
+      shown++;
+    }
+    if (shown == 0) {
+      if (index == 0) {
+        strcpy(&reply[n], "\nno sendtrk rules");
+      } else {
+        sprintf(reply, "Err - no page %d, %d sendtrk rules", page, index);
+      }
+      return;
+    }
+    if (more > 0) n += sprintf(&reply[n], "\n+%d more", more);
+    if (later) strcpy(&reply[n], "\n...");
+  }
+
   // 'fw insert <n>': moves rules number.. down one, up to the first empty slot.
   void insertSlot(int number, char* reply) {
     int free_slot = -1;   // first empty slot from 'number' on
@@ -941,6 +1014,8 @@ private:
     }
     for (int i = free_slot; i > number; i--) _rules[i] = _rules[i - 1];
     _rules[number] = FirewallRule();
+    _senders.forgetRule(free_slot);                  // left over from an old rule there, if any
+    _senders.moveRules(number, free_slot - 1, 1);   // sender clocks move with their rules
     sprintf(reply, "OK - slot %d opened", number);
   }
 
@@ -960,6 +1035,8 @@ private:
     }
     for (int i = number; i < FIREWALL_MAX_RULES - 1; i++) _rules[i] = _rules[i + 1];
     _rules[FIREWALL_MAX_RULES - 1] = FirewallRule();
+    _senders.forgetRule(number);                                // left over from an old rule there, if any
+    _senders.moveRules(number + 1, FIREWALL_MAX_RULES - 1, -1);   // sender clocks move with their rules
     sprintf(reply, "OK - slot %d removed", number);
   }
 

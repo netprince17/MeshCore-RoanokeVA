@@ -28,17 +28,17 @@
 // Default limits (loadDefaults(), when none are saved, or 'hoppol setdefault'): "name:max" pairs, entries not
 // named have no limit. nullptr ends the list.
 static const char* const HOP_POLICY_DEFAULT_LIMITS[] = {
-  "req:6",
-  "anonreq:12",
-  "resp:6",
+  "req:8",
+  "anonreq:8",
+  "resp:8",
   "path:12",
   "ack:12",
   "txt:12",
-  "trace:6",
-  "grpdata:6",
-  "multi:6",
+  "trace:8",
+  "grpdata:8",
+  "multi:8",
   "ctrl:1",
-  "raw:6",
+  "raw:8",
   nullptr
 };
 
