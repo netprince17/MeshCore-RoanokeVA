@@ -38,11 +38,6 @@
 #define FIREWALL_LOOKUP_CHANNEL_TRACKING   4      // chantrk: the channel (channel messages) is over lb / lr
 #define FIREWALL_LOOKUP_PACKET_TRACKING    5      // pkttrk: slot ls (any packet the rule matches) is over lb / lr
 
-// FirewallRule::hop_compare: how the packet's hop count is compared with hop_count (set() hp:N, hp:<N, hp:>N)
-#define FIREWALL_HOPS_EQUAL                0
-#define FIREWALL_HOPS_LESS                 1
-#define FIREWALL_HOPS_GREATER              2
-
 // FirewallRule::action: what a rule does with a packet it matches, once all its used checks pass
 #define FIREWALL_ACTION_DROP               0
 #define FIREWALL_ACTION_FORWARD            1
@@ -67,24 +62,26 @@ static const char* const FIREWALL_DEFAULT_RULES[] = {
   "nm:hoppol                          tl:hoppol                     ac:drop",
 
   // track and restrict advertisements
-  "nm:advlm1   pt:adv     hp:<7       tl:sendtrk       lb:6  lr:12h ac:drop",
-  "nm:advlm2   pt:adv     hp:>6       tl:sendtrk       lb:1  lr:3d  ac:drop",
+  "nm:advlm1   pt:adv     hp:0-4      tl:sendtrk       lb:20 lr:1h  ac:drop",
+  "nm:advlm2   pt:adv     hp:5-8      tl:sendtrk       lb:10 lr:12h ac:drop",
+  "nm:advlm3   pt:adv     hp:9-63     tl:sendtrk       lb:1  lr:3d  ac:drop",
 
   // track and restrict anonymous requests
-  "nm:anrqlm1  pt:anonreq hp:<7       tl:sendtrk       lb:6  lr:12h ac:drop",
-  "nm:anrqlm2  pt:anonreq hp:>6       tl:sendtrk       lb:6  lr:3d  ac:drop",
+  "nm:anrqlm1  pt:anonreq hp:0-4      tl:sendtrk       lb:20 lr:1h  ac:drop",
+  "nm:anrqlm2  pt:anonreq hp:5-8      tl:sendtrk       lb:10 lr:12h ac:drop",
+  "nm:anrqlm3  pt:anonreq hp:9-63     tl:sendtrk       lb:6  lr:3d  ac:drop",
 
   // wardriving should be stopped locally
-  "nm:wrdrvlm  pt:grptxt  hp:>2 ch:81                               ac:drop",
+  "nm:wrdrvlm  pt:grptxt  hp:3-63 ch:81                             ac:drop",
 
   // limit distant messages to each channel, prioritize local channels
-  "nm:chanlm1             hp:<7       tl:chantrk       lb:8  lr:15s ac:fwd",
-  "nm:chanlm2             hp:>6       tl:chantrk       lb:6  lr:15s ac:drop",
+  "nm:chanlm1             hp:0-8      tl:chantrk       lb:8  lr:15s ac:fwd",
+  "nm:chanlm2             hp:9-63     tl:chantrk       lb:6  lr:15s ac:drop",
 
   // total cap on distant tracking tables (chantrk and sendtrk can be abused)
-  "nm:chandos1 pt:grptxt  hp:>6       tl:pkttrk   ls:0 lb:10 lr:6s  ac:drop",
-  "nm:senddos1 pt:adv     hp:>6       tl:pkttrk   ls:1 lb:8 lr:15s  ac:drop",
-  "nm:senddos2 pt:anonreq hp:>6       tl:pkttrk   ls:1 lb:8 lr:15s  ac:drop",
+  "nm:chandos1 pt:grptxt  hp:9-63     tl:pkttrk   ls:0 lb:10 lr:6s  ac:drop",
+  "nm:senddos1 pt:adv     hp:9-63     tl:pkttrk   ls:1 lb:8 lr:15s  ac:drop",
+  "nm:senddos2 pt:anonreq hp:9-63     tl:pkttrk   ls:1 lb:8 lr:15s  ac:drop",
 
   // accept remaining traffic
   "nm:acptfld  rt:flood                                             ac:fwd",
@@ -99,7 +96,7 @@ struct FirewallRule {
 
   // packet matches
   uint8_t  packet_type;            // PAYLOAD_TYPE_* the rule applies to
-  uint8_t  hop_count;              // hop count the rule applies to, compared as hop_compare says
+  uint8_t  hop_min;                // lowest hop count the rule applies to (hp), 0-63
   uint8_t  route_bytes;            // path hash size the rule applies to: bytes per hop in the path, 1, 2 or 3
 
   // packet checks
@@ -113,7 +110,7 @@ struct FirewallRule {
 
   // rule action
   uint8_t  action;                 // FIREWALL_ACTION_DROP or FIREWALL_ACTION_FORWARD
-  uint8_t  hop_compare;            // FIREWALL_HOPS_EQUAL, _LESS or _GREATER: packet hop count vs hop_count
+  uint8_t  hop_max;                // highest hop count the rule applies to (hp), hop_min-63
 
   // packet stats
   uint32_t match_count;            // times this rule has taken action (runtime counter, not a setting)
@@ -256,17 +253,9 @@ public:
       // packet type set: the rule only applies to packets of that type
       if ((r->param_set & FIREWALL_HAS_PACKET_TYPE) && r->packet_type != packet_type) continue;
 
-      // hop count set: the rule only applies to packets whose hop count (repeaters passed) is equal to,
-      // less than, or greater than the rule's hop_count
-      if (r->param_set & FIREWALL_HAS_HOP_COUNT) {
-        if (r->hop_compare == FIREWALL_HOPS_LESS) {
-          if (hop_count >= r->hop_count) continue;
-        } else if (r->hop_compare == FIREWALL_HOPS_GREATER) {
-          if (hop_count <= r->hop_count) continue;
-        } else {
-          if (hop_count != r->hop_count) continue;
-        }
-      }
+      // hop count set: the rule only applies to packets whose hop count (repeaters passed) is in the rule's
+      // range, hop_min to hop_max
+      if ((r->param_set & FIREWALL_HAS_HOP_COUNT) && (hop_count < r->hop_min || hop_count > r->hop_max)) continue;
 
       // route bytes set: the rule only applies to packets whose path uses that many bytes per hop (1, 2 or 3)
       if ((r->param_set & FIREWALL_HAS_ROUTE_BYTES) && packet->getPathHashSize() != r->route_bytes) continue;
@@ -325,7 +314,7 @@ public:
   // A rule needs a match/check field, and a new rule needs ac. lb / lr go with tl:sendtrk, chantrk or pkttrk
   // (both needed, and ls for pkttrk; lb x lr at most 32767 minutes for sendtrk). All or nothing. Returns nullptr,
   // or an error message. Keys and values:
-  //   nm:<name, 8>  pt:<type name|0-15>  hp:<N|<N|>N>  rb:<1-3>  rt:<tflood|flood|direct|tdirect|0-3>
+  //   nm:<name, 8>  pt:<type name|0-15>  hp:<N|A-B|<N|>N>  rb:<1-3>  rt:<tflood|flood|direct|tdirect|0-3>
   //   ch:<hex>  rg:<region name|*>  lb:<0-255>  lr:<N minutes | Ns | Nm | Nh | Nd>
   //   tl:<routepol|hoppol|sendtrk|chantrk|pkttrk>  ls:<0-15>  ac:<drop|fwd>
   const char* set(int number, bool reset, const char* config) {
@@ -375,22 +364,34 @@ public:
           r.param_set |= FIREWALL_HAS_PACKET_TYPE;
         }
 
-      } else if (isKey(field, "hp")) {   // hop count: N exactly, <N less than, >N greater than
+      } else if (isKey(field, "hp")) {   // hop count: N exactly, A-B from A to B, <N less than, >N greater than
         if (unset) {
           r.param_set &= ~FIREWALL_HAS_HOP_COUNT;
         } else {
-          const char* hp_err = "bad hp value, 0-63, <1-63 or >0-62";
+          // a path holds at most 63 hops: 64 is taken as 63 at the top of a range
+          const char* hp_err = "bad hp value, 0-63, A-B (B up to 64), <1-63 or >0-62";
+          const char* dash = (const char*)memchr(v, '-', v_len);
+          uint32_t lo, hi;
           if (v[0] == '<') {
-            if (!parseDecimal(v + 1, v_len - 1, 63, n) || n < 1) return hp_err;   // <0 would never match
-            r.hop_compare = FIREWALL_HOPS_LESS;
+            if (!parseDecimal(v + 1, v_len - 1, 63, hi) || hi < 1) return hp_err;   // <0 would never match
+            lo = 0;
+            hi -= 1;
           } else if (v[0] == '>') {
-            if (!parseDecimal(v + 1, v_len - 1, 62, n)) return hp_err;            // >63 would never match
-            r.hop_compare = FIREWALL_HOPS_GREATER;
+            if (!parseDecimal(v + 1, v_len - 1, 62, lo)) return hp_err;            // >63 would never match
+            lo += 1;
+            hi = 63;
+          } else if (dash != nullptr) {
+            int lo_len = dash - v;
+            if (!parseDecimal(v, lo_len, 63, lo) || !parseDecimal(dash + 1, v_len - lo_len - 1, 64, hi))
+              return hp_err;
+            if (hi > 63) hi = 63;
+            if (lo > hi) return hp_err;
           } else {
-            if (!parseDecimal(v, v_len, 63, n)) return hp_err;
-            r.hop_compare = FIREWALL_HOPS_EQUAL;
+            if (!parseDecimal(v, v_len, 63, lo)) return hp_err;
+            hi = lo;
           }
-          r.hop_count = n;
+          r.hop_min = lo;
+          r.hop_max = hi;
           r.param_set |= FIREWALL_HAS_HOP_COUNT;
         }
 
@@ -585,11 +586,10 @@ public:
       if (name[0] != 0) return sprintf(dest, "%s", name);
       return sprintf(dest, "%d", r->packet_type);
     }
-    if (isKey(key, "hp")) {
+    if (isKey(key, "hp")) {   // N, or a range A-B
       if (!(r->param_set & FIREWALL_HAS_HOP_COUNT)) return -1;
-      if (r->hop_compare == FIREWALL_HOPS_LESS) return sprintf(dest, "<%d", r->hop_count);
-      if (r->hop_compare == FIREWALL_HOPS_GREATER) return sprintf(dest, ">%d", r->hop_count);
-      return sprintf(dest, "%d", r->hop_count);
+      if (r->hop_min == r->hop_max) return sprintf(dest, "%d", r->hop_min);
+      return sprintf(dest, "%d-%d", r->hop_min, r->hop_max);
     }
     if (isKey(key, "rb")) {
       if (!(r->param_set & FIREWALL_HAS_ROUTE_BYTES)) return -1;
