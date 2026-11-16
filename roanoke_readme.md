@@ -31,6 +31,6 @@ NOTE: The default settings only apply on new installs or doing a factory rest.  
 
 ## Upstream
 
-Everything else is stock MeshCore: see [README-meshcore.md](README-meshcore.md) and the [MeshCore repository](https://github.com/meshcore-dev/MeshCore). MIT licence, as upstream: [license.txt](license.txt).
+Everything else is stock MeshCore: see [README.md](README.md) and the [MeshCore repository](https://github.com/meshcore-dev/MeshCore). MIT licence, as upstream: [license.txt](license.txt).
 
 More about the network: [roanokemesh.org](https://roanokemesh.org).
