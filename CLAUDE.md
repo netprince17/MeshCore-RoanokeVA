@@ -10,7 +10,8 @@ our work is in the repeater firmware, `examples/simple_repeater/`.
   Feature work happens on branches on `origin` (adv-filtering-1, backup_repeater1, ...).
 
 ## Build
-- Verify changes with `pio run -e Heltec_v3_repeater` (ESP32-S3). The nRF52 and STM32 builds are
+- Verify changes with `pio run -e Heltec_v3_repeater` (ESP32-S3; if `pio` isn't on PATH,
+  `py -3.14 -m platformio run -e Heltec_v3_repeater`). The nRF52 and STM32 builds are
   blocked on this PC. Ignore the `liblto_plugin-0.dll` warnings.
 - Code must still compile for STM32: StatsHistory and Reports are left out there with
   `#if !defined(STM32_PLATFORM)` (STM32WL has 64 KB RAM).
@@ -24,7 +25,11 @@ our work is in the repeater firmware, `examples/simple_repeater/`.
 - Reports.h: `report` replies and alerts on the #repeaters channel (`reports.*`, `alerts.*`).
 - PrimaryRepeater.h: backup mode (`primary`).
 - Each module saves its own file and falls back to built-in defaults (eg. FIREWALL_DEFAULT_RULES).
-  `<table> show` works on the serial console only.
+- Output too long for one reply is serial console only: `<table> show` / `counts`, `fw senders`,
+  `stats csv`, `reports show`, `config show`. MyMesh checks with isSerialConsole() and the module prints
+  with a `print...(Print&)` function; remotely it replies an error naming the paged command (`show<p>`).
+- `cmds` lists our commands, one reply per group: each module has a `*_HELP` line next to its CLI code
+  (static_assert in MyMesh.cpp: at most 159 characters). Update it when a command changes.
 - Docs: docs/firewall_rules.md, stats_history.md, reports.md, backup_repeater.md.
 
 ## Changes to stock MeshCore (keep these minimal)

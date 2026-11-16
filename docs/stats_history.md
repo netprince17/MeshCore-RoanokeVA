@@ -50,6 +50,8 @@ hist: 125m
 
 **`stats all`**: the same, over every slot there is (as much as the summary's `hist` line says; the same as `stats +1440`).
 
+**`stats csv`** (serial console only): every slot as CSV, oldest first, for a spreadsheet: a header line, then one line per slot. `min_ago` is how many minutes ago the slot ended (5 = the newest, as `stats <minutes>`); `nf_dbm` and `bat_mv` are empty if the slot had no reading. Columns: `min_ago, rx_pkts, rx_bytes, tx_pkts, tx_bytes, air_rx_pct, air_tx_pct, nf_dbm, bat_mv, fw_drops, rx_errors, flood_dups, send_queue, tx_deferred, tx_forced, tx_holds, looped, backup_skipped, backup_sent`.
+
 ```
 rx: 210p/14560b
 tx: 98p/6720b

@@ -41,6 +41,9 @@
 #define REPORTS_NOISEFLOOR_MIN_SLOTS 12        // noise floor alert: at least 1 hour of stats history first
 #define REPORTS_MAX_ALERTS           4         // alerts checkAlerts() can write at once
 
+// 'cmds reports' (one reply): * = serial console only
+#define REPORTS_HELP  "set|get reports.enabled|channel.key|channel.region|hops.max|cooldown alerts.enabled|battery|noisefloor|airtime|primary.missed|cooldown; reports show*"
+
 // the settings, saved in REPORTS_FILE
 struct ReportSettings {
   uint8_t  enabled;               // reports.enabled: replies to 'report' / 'report <name>'
@@ -243,6 +246,40 @@ public:
     return n;
   }
 
+  // Every setting as a 'set' command that recreates it, one per line (as REPORTS_FILE holds them). For the serial
+  // console ('reports show', 'config show').
+  void printSettings(Print& out) const {
+    char line[80];
+    for (const char* const* k = keys(); *k != nullptr; k++) {
+      int n = sprintf(line, "set %s ", *k);
+      formatValue(*k, &line[n]);
+      out.print(line);
+      out.print("\n");
+    }
+  }
+
+  // CLI 'reports show', serial console only (too long for one reply): every setting as a 'set' command, then
+  // "state:" and whether each reply / alert is off, ready, or waiting out its cooldown (minutes left).
+  void printAll(Print& out, uint64_t uptime_millis) const {
+    printSettings(out);
+    out.print("state:\n");
+    printWait(out, "report reply", _s.enabled, _next_reply_millis, uptime_millis);
+    if (!_s.alerts_enabled) {
+      out.print("alerts: off\n");
+      return;
+    }
+    if (uptime_millis < REPORTS_ALERT_START_MILLIS) {
+      char line[48];
+      sprintf(line, "alerts: start in %lum\n", (unsigned long)minutesLeft(REPORTS_ALERT_START_MILLIS, uptime_millis));
+      out.print(line);
+      return;
+    }
+    printWait(out, "battery alert", _s.alert_battery > 0, _next_battery_alert, uptime_millis);
+    printWait(out, "airtime alert", _s.alert_airtime > 0, _next_airtime_alert, uptime_millis);
+    printWait(out, "noisefloor alert", _s.alert_noisefloor > 0, _next_noisefloor_alert, uptime_millis);
+    printWait(out, "primary missed alert", _s.alert_primary_missed > 0, _next_primary_missed_alert, uptime_millis);
+  }
+
   // CLI: 'set reports.* / alerts.* <value>' or 'get reports.* / alerts.*' ('get reports' / 'get alerts' list them).
   // Returns false if 'command' isn't one of these (the shared CLI handles it).
   bool handleCommand(const char* command, char* reply) {
@@ -282,6 +319,25 @@ public:
   }
 
 private:
+  // whole minutes from 'now' to 'until', rounded up (0 if it has passed)
+  static uint32_t minutesLeft(uint64_t until, uint64_t now) {
+    if (until <= now) return 0;
+    return (uint32_t)((until - now + 59999) / 60000);
+  }
+
+  // 'reports show': "<what>: off", "<what>: ready" or "<what>: cooldown, <n>m left"
+  static void printWait(Print& out, const char* what, bool on, uint64_t next_millis, uint64_t uptime_millis) {
+    char line[64];
+    if (!on) {
+      sprintf(line, "%s: off\n", what);
+    } else if (next_millis > uptime_millis) {
+      sprintf(line, "%s: cooldown, %lum left\n", what, (unsigned long)minutesLeft(next_millis, uptime_millis));
+    } else {
+      sprintf(line, "%s: ready\n", what);
+    }
+    out.print(line);
+  }
+
   // true if a slot's median battery reading 'mv' (0: none) is below alerts.battery
   bool isBatteryLow(uint16_t mv) const {
     return mv > 0 && mv < _s.alert_battery * 100;

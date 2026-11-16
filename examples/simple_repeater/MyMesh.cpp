@@ -229,8 +229,8 @@ int MyMesh::handleRequest(ClientInfo *sender, uint32_t sender_timestamp, uint8_t
     stats.n_recv_direct = getNumRecvDirect();
     stats.err_events = _err_flags;
     stats.last_snr = (int16_t)(radio_driver.getLastSNR() * 4);
-    stats.n_direct_dups = ((SimpleMeshTables *)getTables())->getNumDirectDups();
-    stats.n_flood_dups = ((SimpleMeshTables *)getTables())->getNumFloodDups();
+    stats.n_direct_dups = std::min<uint32_t>(((SimpleMeshTables *)getTables())->getNumDirectDups(), 0xFFFF);
+    stats.n_flood_dups = std::min<uint32_t>(((SimpleMeshTables *)getTables())->getNumFloodDups(), 0xFFFF);
     stats.total_rx_air_time_secs = getReceiveAirTime() / 1000;
     stats.n_recv_errors = radio_driver.getPacketsRecvErrors();
     memcpy(&reply_data[4], &stats, sizeof(stats));
@@ -782,7 +782,8 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
         }
       }
 
-      uint8_t temp[166];
+      // 5-byte datagram header + 3-byte reflected CLI prefix + 160-byte reply text + NUL
+      uint8_t temp[169];
       char *command = (char *)&data[5];
       char *reply = (char *)&temp[5];
       if (is_retry) {
@@ -1277,6 +1278,33 @@ static bool isTableCommand(char* command, const char* name) {
   return true;
 }
 
+// 'cmds': the groups of commands we added, then 'cmds <group>' for one group's commands. Each fits one LoRa reply.
+#if !defined(STM32_PLATFORM)
+  #define CMDS_HELP  "cmds fw|routepol|hoppol|primary|stats|reports|config; x[p]: x<p> a page, plain x serial only; *: serial only"
+#else
+  #define CMDS_HELP  "cmds fw|routepol|hoppol|primary|config; x[p]: x<p> a page, plain x serial only; *: serial only"
+#endif
+#define CONFIG_HELP  "config show*"
+#define CMDS_REPLY_MAX  159   // longest reply text (the reply buffer holds 160 with the NUL, as STATS_HISTORY_REPLY_SIZE)
+static_assert(sizeof(CMDS_HELP) - 1 <= CMDS_REPLY_MAX, "cmds help too long for one reply");
+static_assert(sizeof(CONFIG_HELP) - 1 <= CMDS_REPLY_MAX, "cmds config help too long for one reply");
+static_assert(sizeof(FIREWALL_HELP) - 1 <= CMDS_REPLY_MAX, "cmds fw help too long for one reply");
+static_assert(sizeof(ROUTE_POLICY_HELP) - 1 <= CMDS_REPLY_MAX, "cmds routepol help too long for one reply");
+static_assert(sizeof(HOP_POLICY_HELP) - 1 <= CMDS_REPLY_MAX, "cmds hoppol help too long for one reply");
+static_assert(sizeof(PRIMARY_HELP) - 1 <= CMDS_REPLY_MAX, "cmds primary help too long for one reply");
+#if !defined(STM32_PLATFORM)
+static_assert(sizeof(STATS_HISTORY_HELP) - 1 <= CMDS_REPLY_MAX, "cmds stats help too long for one reply");
+static_assert(sizeof(REPORTS_HELP) - 1 <= CMDS_REPLY_MAX, "cmds reports help too long for one reply");
+#endif
+
+// For commands whose output only fits the serial console: true if 'command' came from it (sender_timestamp 0), else
+// "Err - <command>: serial console only, use <instead>" in 'reply' and false.
+static bool isSerialConsole(const char* command, uint32_t sender_timestamp, const char* instead, char* reply) {
+  if (sender_timestamp == 0) return true;
+  sprintf(reply, "Err - %s: serial console only, use %s", command, instead);   // short: known commands only
+  return false;
+}
+
 void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply) {
   if (region_load_active) {
     if (StrHelper::isBlank(command)) {  // empty/blank line, signal to terminate 'load' operation
@@ -1364,36 +1392,41 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       strcpy(reply, "OK - Discover sent");
     }
   } else if (isTableCommand(command, "fw")) {
-    // '<table> show' lists everything as commands: serial console only (too long for one reply)
-    if (strcmp(command, "fw show") != 0) {
+    // '<table> show' lists everything as commands, '<table> counts' every match count, 'fw senders' the whole sender
+    // tracking table: serial console only (too long for one reply)
+    if (strcmp(command, "fw show") == 0) {
+      if (isSerialConsole(command, sender_timestamp, "fw show<p>", reply)) firewall.printAll(Serial, _prefs.firewall_enabled);
+    } else if (strcmp(command, "fw counts") == 0) {
+      if (isSerialConsole(command, sender_timestamp, "fw show<p>", reply)) firewall.printCounts(Serial, _prefs.firewall_enabled);
+    } else if (strcmp(command, "fw senders") == 0 && sender_timestamp == 0) {
+      firewall.printSenders(Serial, uptime_millis);
+    } else {   // remote 'fw senders' gets its error from handleCommand()
       firewall.handleCommand(&command[2], reply, _prefs.firewall_enabled, uptime_millis);
-    } else if (sender_timestamp == 0) {
-      firewall.printAll(Serial, _prefs.firewall_enabled);
-    } else {
-      strcpy(reply, "Err - fw show: serial console only, use fw show<p>");
     }
   } else if (isTableCommand(command, "routepol")) {
-    if (strcmp(command, "routepol show") != 0) {
-      firewall.getRoutePolicy()->handleCommand(&command[8], reply);
-    } else if (sender_timestamp == 0) {
-      firewall.getRoutePolicy()->printAll(Serial);
+    if (strcmp(command, "routepol show") == 0) {
+      if (isSerialConsole(command, sender_timestamp, "routepol show<p>", reply)) firewall.getRoutePolicy()->printAll(Serial);
+    } else if (strcmp(command, "routepol counts") == 0) {
+      if (isSerialConsole(command, sender_timestamp, "routepol show<p>", reply)) firewall.getRoutePolicy()->printCounts(Serial);
     } else {
-      strcpy(reply, "Err - routepol show: serial console only, use routepol show<p>");
+      firewall.getRoutePolicy()->handleCommand(&command[8], reply);
     }
   } else if (isTableCommand(command, "hoppol")) {
-    if (strcmp(command, "hoppol show") != 0) {
-      firewall.getHopPolicy()->handleCommand(&command[6], reply);
-    } else if (sender_timestamp == 0) {
-      firewall.getHopPolicy()->printAll(Serial);
+    if (strcmp(command, "hoppol show") == 0) {
+      if (isSerialConsole(command, sender_timestamp, "hoppol show<p>", reply)) firewall.getHopPolicy()->printAll(Serial);
+    } else if (strcmp(command, "hoppol counts") == 0) {
+      if (isSerialConsole(command, sender_timestamp, "hoppol show<p>", reply)) firewall.getHopPolicy()->printCounts(Serial);
     } else {
-      strcpy(reply, "Err - hoppol show: serial console only, use hoppol show<p>");
+      firewall.getHopPolicy()->handleCommand(&command[6], reply);
     }
 #if !defined(STM32_PLATFORM)
-  } else if (isTableCommand(command, "stats")) {   // 'stats', 'stats all', 'stats <minutes>' or 'stats +<minutes>'
+  } else if (isTableCommand(command, "stats")) {   // 'stats', 'stats all|csv', 'stats <minutes>' or 'stats +<minutes>'
     const char* p = &command[5];
     while (*p == ' ') p++;
     if (*p == 0) {
       stats_history.formatSummary(reply);
+    } else if (strcmp(p, "csv") == 0) {   // every slot as CSV: serial console only (too long for one reply)
+      if (isSerialConsole(command, sender_timestamp, "stats <minutes>", reply)) stats_history.printCsv(Serial);
     } else if (strcmp(p, "all") == 0) {   // every slot there is
       stats_history.formatPeriod(STATS_HISTORY_SLOTS * 5, reply);
     } else {
@@ -1403,7 +1436,7 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       bool any_digit = (*p >= '0' && *p <= '9');
       while (*p >= '0' && *p <= '9' && minutes <= STATS_HISTORY_SLOTS * 5) minutes = minutes * 10 + (*p++ - '0');
       if (!any_digit || *p != 0 || minutes < 5 || minutes > STATS_HISTORY_SLOTS * 5 || minutes % 5 != 0) {
-        strcpy(reply, "Err - use: stats [all|[+]<minutes: 5, 10, 15 ... 1440>]");
+        strcpy(reply, "Err - use: stats [all|csv|[+]<minutes: 5, 10, 15 ... 1440>]");
       } else if (period) {
         stats_history.formatPeriod(minutes, reply);
       } else {
@@ -1412,15 +1445,49 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     }
 #endif
 #if !defined(STM32_PLATFORM)
+  } else if (strcmp(command, "reports show") == 0) {   // every setting as 'set' commands, and the alert state
+    if (isSerialConsole(command, sender_timestamp, "get reports / get alerts", reply)) {
+      reports.printAll(Serial, uptime_millis);
+    }
   } else if (reports.handleCommand(command, reply)) {   // set / get reports.* and alerts.*
 #endif
   } else if (isTableCommand(command, "primary")) {   // backup mode
-    if (strcmp(command, "primary show") != 0) {
-      primaries.handleCommand(&command[7], reply);
-    } else if (sender_timestamp == 0) {
-      primaries.printAll(Serial);
+    if (strcmp(command, "primary show") == 0) {
+      if (isSerialConsole(command, sender_timestamp, "primary show<p>", reply)) primaries.printAll(Serial);
     } else {
-      strcpy(reply, "Err - primary show: serial console only, use primary show<p>");
+      primaries.handleCommand(&command[7], reply);
+    }
+  } else if (isTableCommand(command, "cmds")) {   // the commands we added, one group per reply (fits LoRa)
+    const char* group = &command[4];
+    while (*group == ' ') group++;
+    const char* help = CMDS_HELP;   // no / an unknown group: the group list
+    if (strcmp(group, "fw") == 0) help = FIREWALL_HELP;
+    else if (strcmp(group, "routepol") == 0) help = ROUTE_POLICY_HELP;
+    else if (strcmp(group, "hoppol") == 0) help = HOP_POLICY_HELP;
+    else if (strcmp(group, "primary") == 0) help = PRIMARY_HELP;
+#if !defined(STM32_PLATFORM)
+    else if (strcmp(group, "stats") == 0) help = STATS_HISTORY_HELP;
+    else if (strcmp(group, "reports") == 0) help = REPORTS_HELP;
+#endif
+    else if (strcmp(group, "config") == 0) help = CONFIG_HELP;
+    strcpy(reply, help);
+  } else if (strcmp(command, "config show") == 0) {
+    // the firewall, route / hop policy, backup mode and reports settings as one script of commands that recreate
+    // them (each table cleared first, then saved), to paste into this or another repeater: serial console only
+    if (isSerialConsole(command, sender_timestamp, "fw show<p>, routepol show<p>, hoppol show<p>, primary show<p>",
+                        reply)) {
+      Serial.print("fw clear\n");
+      firewall.printAll(Serial, _prefs.firewall_enabled);   // set fw.enabled, then every rule
+      Serial.print("fw save\nroutepol clear\n");
+      firewall.getRoutePolicy()->printAll(Serial);
+      Serial.print("routepol save\n");
+      firewall.getHopPolicy()->printAll(Serial);   // every entry, '-' for none
+      Serial.print("hoppol save\n");
+      primaries.printCommands(Serial);
+      Serial.print("primary save\n");
+#if !defined(STM32_PLATFORM)
+      reports.printSettings(Serial);   // each 'set' saves itself
+#endif
     }
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands

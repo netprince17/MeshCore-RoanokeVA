@@ -4,7 +4,7 @@ This is a basic firewall designed to prioritize messaging over unnecessary backg
 
 The firewall uses pre-defined lookup tables for tracking purposes.  Tracking is based on the [generic cell rate algorithm](https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm) in order to minimize memory usage.  
 
-For example, instead of blocking adverts at a certain number of hops, this firewall tracks up to 2048 senders, allowing distant senders only 1 advert every 3 days.
+For example, instead of blocking adverts at a certain number of hops, this firewall keeps up to 2340 sender clocks, allowing distant senders only 1 advert every 3 days.
 
 Three tables work together, each with its own CLI command:
 
@@ -69,13 +69,13 @@ Distant packets can only push the channel's clock about 180 s ahead, so local us
 ```
  0 nm:routepol                   tl:routepol                  ac:drop   packets on listed routes
  1 nm:hoppol                     tl:hoppol                    ac:drop   packets over a hop limit
- 2 nm:advlm1   pt:adv     hp:0-4  tl:sendtrk      lb:10 lr:30m ac:drop   nearby adverts over 10, then 1 per 30 minutes
- 3 nm:advlm2   pt:adv     hp:5-8  tl:sendtrk      lb:10 lr:1h  ac:drop   mid-range adverts over 10, then 1 an hour
+ 2 nm:advlm1   pt:adv     hp:0-4  tl:sendtrk      lb:15 lr:30m ac:drop   nearby adverts over 15, then 1 per 30 minutes
+ 3 nm:advlm2   pt:adv     hp:5-8  tl:sendtrk      lb:15 lr:1h  ac:drop   mid-range adverts over 15, then 1 an hour
  4 nm:advlm3   pt:adv     hp:9-63 tl:sendtrk      lb:1  lr:3d  ac:drop   distant adverts over 1 per 3 days
- 5 nm:anrqlm1  pt:anonreq hp:0-4  tl:sendtrk      lb:10 lr:30m ac:drop   nearby anon requests over 10, then 1 per 30 minutes
- 6 nm:anrqlm2  pt:anonreq hp:5-8  tl:sendtrk      lb:10 lr:1h  ac:drop   mid-range anon requests over 10, then 1 an hour
- 7 nm:reqlm1   pt:req     hp:0-4  tl:sendtrk      lb:5  lr:30m ac:drop   nearby requests over 5, then 1 per 30 minutes, per source / destination pair
- 8 nm:reqlm2   pt:req     hp:5-8  tl:sendtrk      lb:5  lr:1h  ac:drop   mid-range requests over 5, then 1 an hour, per pair
+ 5 nm:anrqlm1  pt:anonreq hp:0-4  tl:sendtrk      lb:15 lr:30m ac:drop   nearby anon requests over 15, then 1 per 30 minutes
+ 6 nm:anrqlm2  pt:anonreq hp:5-8  tl:sendtrk      lb:15 lr:1h  ac:drop   mid-range anon requests over 15, then 1 an hour
+ 7 nm:reqlm1   pt:req     hp:0-4  tl:sendtrk      lb:15 lr:30m ac:drop   nearby requests over 15, then 1 per 30 minutes, per sender
+ 8 nm:reqlm2   pt:req     hp:5-8  tl:sendtrk      lb:15 lr:1h  ac:drop   mid-range requests over 15, then 1 an hour, per sender
  9 nm:wrdrvlm  pt:grptxt  hp:3-63 ch:81                        ac:drop   #wardriving: at most 3 repeaters
 10 nm:chanlm1             hp:0-8  tl:chantrk      lb:8  lr:15s ac:fwd    nearby channel messages: always forwarded, but
                                                                          counted, so they use up the channel's allowance first
@@ -86,7 +86,7 @@ Distant packets can only push the channel's clock about 180 s ahead, so local us
 15 nm:acpttfld rt:tflood                                       ac:fwd
 ```
 
-Anon requests and requests have no distant rules: the hop policy (`anonreq:8`, `req:8`) drops them past 8 hops. Distant channel data (`grpdata`) needs no total cap either: `grpdata:8` drops it.
+Anon requests and requests have no distant rules: the hop policy (`anonreq:8`, `req:8`) drops them past 8 hops. Responses, DMs and path returns (`resp`, `txt`, `path`) have no `sendtrk` rules: their sender is often a repeater or room server replying to many clients, which would all share one allowance. Dropping a path return also loses the ACK and the path back, so the client keeps sending flood-routed packets. Only the hop policy limits them. Distant channel data (`grpdata`) needs no total cap either: `grpdata:8` drops it.
 
 The total caps (`chandos1`, `senddos1`) catch distant senders using new channel hashes or new keys, which get a new per-channel or per-sender allowance each time. Their limits are far above normal traffic, so they only act during a flood of packets. Nearby and mid-range packets (0-8 hops) have no total cap: only their per-sender limits apply. A sender can claim any hop count, so a total cap for them can be added with `tl:pkttrk` on a free slot if needed.
 
@@ -161,11 +161,11 @@ Each `sendtrk` rule has its own clock for each sender, in whole minutes, so rule
 |---|---|---|
 | `adv` | the public key (signed) | one per sender |
 | `anonreq` | the public key (can't be checked by a repeater) | one per sender |
-| `req`, `resp`, `txt`, `path` | the 1-byte source hash (can't be checked by a repeater) | one per source and destination hash pair |
+| `req`, `resp`, `txt`, `path` | the 1-byte source hash and the first repeater's hash in the path (1-3 bytes; 0 for a packet heard straight from the sender, the same as a repeater with hash `00` or `0000`). Can't be checked by a repeater | one per sender, whatever the destination |
 
-Other packet types don't match. A sender's adverts and anon requests always have separate clocks, even on a rule without `pt`. Senders that share a 1-byte source hash share a clock for the same destination.
+Other packet types don't match. Dummy `000000` hashes at the start of a path are skipped, so the first real repeater is used. Senders with the same source hash and first repeater share a clock. A sender heard through different first repeaters gets a clock for each. A rule without `pt` shares each sender's clock between the packet types it sees (eg. its adverts and anon requests).
 
-The rule sets the limit: `lb` in a row, then 1 more every `lr`, with `lb` x `lr` at most 32,767 minutes. Up to 2048 clocks are kept: when they're all in use, a new one replaces the one closest to fully recovered. Per-sender limits stop single misbehaving nodes: a sender using new keys gets a new allowance each time, so use `tl:pkttrk` for a total cap (as `senddos1`).
+The rule sets the limit: `lb` in a row, then 1 more every `lr`, with `lb` x `lr` at most 32,767 minutes. Up to 2340 clocks are kept (585 on STM32), 7 bytes each, one per sender per rule: when they're all in use, a new one replaces the one closest to fully recovered. Per-sender limits stop single misbehaving nodes: a sender using new keys gets a new allowance each time, so use `tl:pkttrk` for a total cap (as `senddos1`).
 
 Clocks belong to a rule's slot:
 
@@ -179,7 +179,7 @@ Clocks belong to a rule's slot:
 
 To start a rule's senders over after changing its `pt` or `tl`, replace the rule instead of editing it.
 
-Examples: `fw 2 nm:advlm1 pt:adv hp:0-4 tl:sendtrk lb:3 lr:4h ac:drop`, `fw 20 nm:reqlm pt:req hp:3-63 tl:sendtrk lb:4 lr:10m ac:drop` (requests per source / destination pair).
+Examples: `fw 2 nm:advlm1 pt:adv hp:0-4 tl:sendtrk lb:3 lr:4h ac:drop`, `fw 20 nm:reqlm pt:req hp:3-63 tl:sendtrk lb:4 lr:10m ac:drop` (requests per sender).
 
 ## Channel tracking table
 
@@ -195,7 +195,7 @@ Example: `fw 10 nm:chanlm2 hp:9-63 tl:chantrk lb:6 lr:15s ac:drop`.
 
 `tl:pkttrk`
 
-This table puts one shared limit on whatever the rule matches. For example, it can cap all distant channel messages together, which also catches spam spread over many channel hashes, or all distant adverts and anon requests together, which also catches senders using new keys.
+This table puts one shared limit on whatever the rule matches. For example, it can cap all distant channel messages together, which also catches spam spread over many channel hashes, or all distant adverts together, which also catches senders using new keys.
 
 There are 16 numbered slots (`ls:0` to `ls:15`), each a clock in seconds. Rules using the same slot share its allowance.
 
@@ -210,17 +210,25 @@ Replies (except show pages) can be pasted back as commands. Show pages start wit
 | `fw` | slots in use, then ` (firewall off)` if it's off |
 | `fw show1` ... `show6` | 6 slots per page: `firewall on` / `off`, then one `slot name match_count` line per rule |
 | `fw show` | every rule as `fw <n> - <config>` commands, after `set fw.enabled 0/1` (serial console only) |
+| `fw counts` | every rule's match count, `slot name action matches` (serial console only) |
 | `fw <n>` | the rule, eg. `nm:hoppol tl:hoppol ac:drop`, or `-` if the slot is empty |
 | `fw <n> <words>` | `key:value` sets, `key` shows, `show` the whole rule, `-` clears the slot first |
 | `fw insert <n>` / `fw collapse <n>` | open slot n / remove empty slot n, moving the rules after it |
 | `fw clear` / `setdefault` / `save` / `reload` | |
 | `fw unsave` | removes the saved rules: the current ones stay, the defaults load at boot (or `fw setdefault`) |
-| `fw senders` / `senders2` ... | the sender tracking table (`tl:sendtrk`): `senders: <tracked>/2048`, clocks whose limits are still in effect (allowance not fully back), then 4 `sendtrk` rules per page: `<slot> <name>: <tracked> (<over> over)`, over: senders whose next packet is over the rule's limit. `(overwriting)`: all 2048 are tracked, so a new one replaces the one closest to fully recovered, losing its limits early |
+| `fw senders1` / `senders2` ... | the sender tracking table (`tl:sendtrk`), 4 `sendtrk` rules per page: `senders: <tracked>/<size>` (size: 2340, or 585 on STM32), then the title `# rule tracked/maxed (dropped)`, then `<slot> <name> <tracked>/<maxed> (<dropped>)` per rule, eg. `4 advlm3 7/7 (1234)`. tracked: senders whose limit is still in effect (allowance not fully back); maxed: senders whose next packet would be dropped (with `lb:1` that's every tracked sender); dropped: packets the rule dropped (its match count, as `fw show<p>`; `fwd` after it on an `ac:fwd` rule, which forwards them instead). `(overwriting)`: all <size> are tracked, so a new one replaces the one closest to fully recovered, losing its limits early |
+| `fw senders` | the whole sender tracking table (serial console only): `senders: <tracked> tracked, <in use>/<size> records, <n> replaced since boot` (replaced: records whose limits were lost early because the table was full), then the title `# rule tracked maxed dropped window` and a line for every `sendtrk` rule (as the pages; window: `lb` x `lr`), then `left over from old rules`: clocks of slots that no longer hold a `sendtrk` rule |
 | `routepol ...` | the same as `fw`, without insert / collapse (fields `nm`, `rh`, `ps`); `show1` ... `show6`: 6 slots per page, `slot name match_count` |
+| `routepol counts` | every route's match count, `slot name matches` (serial console only) |
 | `hoppol` | limits that are set, eg. `txt:12 path:12` |
 | `hoppol <words>` | `name:max` sets (`-` none), `name` shows, `show1` ... `show5`: 5 entries per page, `entry name seen/matched` |
 | `hoppol show` | every entry's limit as `hoppol` commands (serial console only) |
+| `hoppol counts` | all 22 entries, `entry limit seen matched` (serial console only) |
 | `hoppol clear` / `setdefault` / `save` / `reload` / `unsave` | |
+| `config show` | the whole firewall, route policy, hop policy, backup mode and reports setup as one script of commands, each table cleared first and saved after, to paste into this or another repeater (serial console only). Regions and stock settings aren't included. While it's pasted, between `fw clear` and the rules, no flood-routed packets are forwarded |
+| `cmds` / `cmds <group>` | the commands this build adds: the groups, or one group's commands (`fw`, `routepol`, `hoppol`, `primary`, `stats`, `reports`, `config`), one reply each so they work remotely. `x[p]`: `x<p>` a page, plain `x` serial console only; `*`: serial console only |
+
+Serial console only commands reply remotely with an error naming the paged command to use instead, eg. `Err - fw counts: serial console only, use fw show<p>`.
 
 Saved files: `/fw_rules_v1`, `/route_pol_v1`, `/hop_pol_v1` (text, one entry per line). If a saved file can't be loaded (at boot or by `reload`), that table gets its defaults; `reload` with nothing saved changes nothing. A saved rule whose region is no longer in the region list is skipped (its slot left empty), and the rest load.
 
@@ -236,5 +244,5 @@ Saved files: `/fw_rules_v1`, `/route_pol_v1`, `/hop_pol_v1` (text, one entry per
 | `examples/simple_repeater/PacketTracking.h` | allowance clocks (`ls` slots, and the channels') |
 | `examples/simple_repeater/TableCli.h` | CLI helpers shared by the tables |
 | `examples/simple_repeater/TableFile.h` | file helpers |
-| `examples/simple_repeater/MyMesh.cpp` | `allowPacketForward()` calls the firewall; `begin()` loads the tables; `show` commands |
+| `examples/simple_repeater/MyMesh.cpp` | `allowPacketForward()` calls the firewall; `begin()` loads the tables; the serial console only commands (`show`, `counts`, `fw senders`, `config show`) and `cmds` |
 | `src/helpers/CommonCLI.cpp` | `set` / `get fw.enabled` |

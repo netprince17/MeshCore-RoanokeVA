@@ -46,6 +46,9 @@
 
 #define STATS_HISTORY_REPLY_SIZE                160    // CLI reply buffer, the end NUL included
 
+// 'cmds stats' (one reply): * = serial console only
+#define STATS_HISTORY_HELP  "stats [all|<min>|+<min>]|csv*"
+
 #if !defined(STM32_PLATFORM)
 
 // One 5-minute slot of history. Fields largest first, so there's no padding.
@@ -317,6 +320,28 @@ public:
     StatsHistoryTotals t;
     sumSlots(0, minutes / 5, t);
     formatTotals(t, reply);
+  }
+
+  // CLI 'stats csv', serial console only (too long for one reply): every slot as CSV, oldest first, after a header
+  // line. min_ago: minutes ago the slot ended (5 = the newest). Noise floor / battery are empty if the slot had no
+  // reading.
+  void printCsv(Print& out) const {
+    out.print("min_ago,rx_pkts,rx_bytes,tx_pkts,tx_bytes,air_rx_pct,air_tx_pct,nf_dbm,bat_mv,fw_drops,rx_errors,"
+              "flood_dups,send_queue,tx_deferred,tx_forced,tx_holds,looped,backup_skipped,backup_sent\n");
+    char line[128];
+    for (int age = _count - 1; age >= 0; age--) {
+      const StatsHistorySlot* s = getSlot(age);
+      char nf[8] = "", bat[8] = "";
+      if (s->noisefloor_dbm != STATS_HISTORY_NOISEFLOOR_NONE) sprintf(nf, "%d", s->noisefloor_dbm);
+      if (s->battery_mv > 0) sprintf(bat, "%u", (unsigned)s->battery_mv);
+      snprintf(line, sizeof(line), "%d,%u,%u,%u,%u,%u,%u,%s,%s,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", (age + 1) * 5,
+               (unsigned)s->rx_packets, (unsigned)s->rx_bytes, (unsigned)s->tx_packets, (unsigned)s->tx_bytes,
+               (unsigned)s->airtime_rx_percent, (unsigned)s->airtime_tx_percent, nf, bat, (unsigned)s->fw_drops,
+               (unsigned)s->rx_errors, (unsigned)s->flood_dups, (unsigned)s->send_queue_peak,
+               (unsigned)s->tx_deferred, (unsigned)s->tx_forced, (unsigned)s->tx_budget_holds, (unsigned)s->looped,
+               (unsigned)s->backup_pkts_skipped, (unsigned)s->backup_pkts_sent);
+      out.print(line);
+    }
   }
 
   // 'sum' / 'n', rounded to nearest (negative sums too), or 0 if n is 0

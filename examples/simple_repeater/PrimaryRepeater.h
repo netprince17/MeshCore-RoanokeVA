@@ -24,6 +24,8 @@
 #define PRIMARY_PAGES         ((PRIMARY_SLOTS + PRIMARY_PAGE_SLOTS - 1) / PRIMARY_PAGE_SLOTS)
 
 #define PRIMARY_USAGE  "use: primary [<0-15> [<hash>|-]|holdoff [<0-20>]|save|unsave|reload|clearall|show<p>]"
+// 'cmds primary' (one reply), as FIREWALL_HELP
+#define PRIMARY_HELP   "primary [<0-15> [<hash>|-]]|holdoff [<0-20>]|show[p]|save|unsave|reload|clearall"
 
 class PrimaryRepeater {
   uint8_t _hash[PRIMARY_SLOTS][PRIMARY_HASH_MAX];     // 'primary <n>'
@@ -109,6 +111,22 @@ public:
     if (i < 0) return false;
     countSkipped(_recent_slot[i]);
     return true;
+  }
+
+  // The settings as 'primary' commands that recreate them, one per line (for 'config show'): clearall, the
+  // hold-off, then each slot in use. Not saved until 'primary save'.
+  void printCommands(Print& out) const {
+    char line[40];
+    out.print("primary clearall\n");
+    sprintf(line, "primary holdoff %d\n", _holdoff);
+    out.print(line);
+    for (int i = 0; i < PRIMARY_SLOTS; i++) {
+      if (_hash_len[i] == 0) continue;
+      int n = sprintf(line, "primary %d ", i);
+      formatHash(i, &line[n]);
+      out.print(line);
+      out.print("\n");
+    }
   }
 
   // 'primary show' on the serial console: the header, then every slot in use (as the show pages), or "no primaries"

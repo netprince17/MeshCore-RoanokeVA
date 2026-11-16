@@ -54,6 +54,8 @@ To cap how far they're relayed, the path is pre-filled with dummy `000000` 3-byt
 
 `set <setting> <value>` and `get <setting>`, saved straight away. `get reports` and `get alerts` list them all.
 
+`reports show` (serial console only) lists every setting as a `set` command, to paste back, then `state:` and one line per reply / alert: `off`, `ready`, or `cooldown, <n>m left` (one was sent and it won't repeat until then). In the first 15 minutes after boot it says `alerts: start in <n>m` instead.
+
 | Setting | Default | Values |
 |---|---|---|
 | `reports.enabled` | `0` | `0` / `1`: replies to `report` / `report <name>` |

@@ -24,6 +24,8 @@
 #define HOP_POLICY_ENTRIES       22     // number of entries in the fixed list
 #define HOP_POLICY_PAGE_ENTRIES  5      // entries per 'hoppol show<p>' page (fits large seen / matched counts)
 #define HOP_POLICY_PAGES         ((HOP_POLICY_ENTRIES + HOP_POLICY_PAGE_ENTRIES - 1) / HOP_POLICY_PAGE_ENTRIES)
+// 'cmds hoppol' (one reply), as FIREWALL_HELP
+#define HOP_POLICY_HELP  "hoppol [name:max|name]|show[p]|counts*|clear|setdefault|save|reload|unsave"
 
 // Default limits (loadDefaults(), when none are saved, or 'hoppol setdefault'): "name:max" pairs, entries not
 // named have no limit. nullptr ends the list.
@@ -238,6 +240,22 @@ public:
       formatMax(&item[n], _max_hops[i]);
       out.print(item);
       if (i % HOP_POLICY_PAGE_ENTRIES == HOP_POLICY_PAGE_ENTRIES - 1 || i == HOP_POLICY_ENTRIES - 1) out.print("\n");
+    }
+  }
+
+  // Every entry's limit ('-' none) and counts, for the serial console ('hoppol counts'): too long for one reply. A
+  // header, then one "entry limit seen matched" line per entry (seen: packets it applied to, matched: times its limit
+  // made a firewall rule act).
+  void printCounts(Print& out) const {
+    char line[64];
+    sprintf(line, "%-8s %5s %10s %10s\n", "entry", "limit", "seen", "matched");
+    out.print(line);
+    for (int i = 0; i < HOP_POLICY_ENTRIES; i++) {
+      char limit[8];
+      formatMax(limit, _max_hops[i]);
+      sprintf(line, "%-8s %5s %10lu %10lu\n", getEntry(i)->name, limit, (unsigned long)_seen_counts[i],
+              (unsigned long)_match_counts[i]);
+      out.print(line);
     }
   }
 

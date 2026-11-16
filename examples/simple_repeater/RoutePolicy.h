@@ -21,6 +21,8 @@
 
 // CLI (handleCommand())
 #define ROUTE_POLICY_PAGE_SLOTS      6    // slots per 'routepol show<p>' page (as FIREWALL_PAGE_SLOTS)
+// 'cmds routepol' (one reply), as FIREWALL_HELP
+#define ROUTE_POLICY_HELP  "routepol [<n> [-] [nm:|rh:|ps:]]|show[p]|counts*|clear|setdefault|save|reload|unsave"
 #define ROUTE_POLICY_COMMAND_MAX     160  // longest 'routepol' command
 
 #define ROUTE_POLICY_FILE  "/route_pol_v1"   // saved routes: one "<n> - <config>" line per route (a new format: _v2)
@@ -318,6 +320,25 @@ public:
       out.print(line);
       out.print("\n");
     }
+  }
+
+  // Every route's match count, for the serial console ('routepol counts'): too long for one reply. A header, then
+  // one "slot name matches" line per route.
+  void printCounts(Print& out) const {
+    char line[48];
+    sprintf(line, "%-11s %10s\n", "route", "matches");
+    out.print(line);
+    int routes = 0;
+    for (int i = 0; i < ROUTE_POLICY_MAX_ROUTES; i++) {
+      const RoutePolicyEntry* e = getEntry(i);
+      if (e == nullptr) continue;
+      const char* name = e->name;
+      if (name[0] == 0) name = "?";
+      sprintf(line, "%2d %-8s %10lu\n", i, name, (unsigned long)_match_counts[i]);
+      out.print(line);
+      routes++;
+    }
+    if (routes == 0) out.print("no routes\n");
   }
 
   // CLI 'routepol': the same commands as 'fw' (see FirewallTable::handleCommand()), without insert / collapse.
