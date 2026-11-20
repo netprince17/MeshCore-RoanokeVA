@@ -1325,7 +1325,8 @@ private:
   // Page 'page' of the logged drops matching 'filter', newest first: the since-boot count (formatLogTotal()),
   // then FIREWALL_LOG_PAGE_ENTRIES "<age> <slot> <type> <hops> <key>" lines ("-": no rule matched, "old": a rule
   // since replaced; no slot when filtered), the key without its label ("a1b2c3d4", "3a/9e", "5e", "0", "2",
-  // "req"), then "..." on its own line if a later page has drops. The longest 5 entries fit one reply.
+  // "rb2"; none for a hop policy packet type entry, which repeats the type), then "..." on its own line if a later
+  // page has drops. The longest 5 entries fit one reply.
   void formatLogPage(int page, int filter, uint64_t uptime_millis, char* reply) const {
     int n = formatLogTotal(filter, reply);
     int first = (page - 1) * FIREWALL_LOG_PAGE_ENTRIES;   // index of the page's first matching entry
@@ -1354,7 +1355,9 @@ private:
       item[len++] = ' ';
       len += formatLogType(e, &item[len]);
       len += sprintf(&item[len], " %d", e->hops);
-      if (e->table != FIREWALL_LOG_TABLE_NONE) {
+      const HopPolicyEntry* hop = e->table == FIREWALL_LOG_TABLE_HOPPOL ? HopPolicy::getEntry((int)e->key) : nullptr;
+      bool repeats_type = hop != nullptr && hop->property == HOP_POLICY_PACKET_TYPE;   // eg. 'req': the type again
+      if (e->table != FIREWALL_LOG_TABLE_NONE && !repeats_type) {
         item[len++] = ' ';
         len += FirewallLog::formatKey(e, false, _route_policy, &item[len]);
       }

@@ -340,7 +340,7 @@ drops: 1873 since boot, 128 logged
 
 A rule without a table has no key. `- (none)`: no rule matched, so the packet was dropped at the end of the list. `- (old)`: the rule was replaced or its slot emptied since. Entries move with their rules on `fw insert` / `fw collapse`, and `fw clear` / `setdefault` / `reload` empty the log.
 
-Pages leave out the labels, the rule names and the route type to fit 5 entries in one reply. Filtered pages leave out the slot too, and their first line is the rule's drops since boot (its match count):
+Pages leave out the labels, the rule names and the route type to fit 5 entries in one reply, and a hop policy key that only repeats the packet type (`req`, `txt`, ...; `flood`, `tflood` and `rb1`-`rb3` are shown). Filtered pages leave out the slot too, and their first line is the rule's drops since boot (its match count):
 
 ```
 fw log1
@@ -348,8 +348,8 @@ drops: 1873
 12s 4 adv 11 a1b2c3d4
 40s 11 grptxt 9 5e
 1m 12 grptxt 10 0
-3m 1 req 9 req
-5m 8 req 6 3a/9e
+3m 1 req 9
+4m 1 txt 12 rb2
 ...
 ```
 
