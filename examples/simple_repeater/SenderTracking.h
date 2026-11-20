@@ -66,6 +66,24 @@ public:
   // counted, false. Adverts: the signed public key. Anon requests: the public key after the dest hash (can't be
   // verified). req / resp / txt / path: the source hash and first repeater hash (can't be verified). Other packet
   // types, or a payload too short: false (not handled). Expects Packet.h to be included first, as MyMesh.h does.
+  // The sender as the firewall log shows it: adverts and anon requests the first 4 public key bytes (how nodes are
+  // known, unlike the middle bytes keyIdOf() tracks), req / resp / txt / path the same id as hashIdOf(). 0 for
+  // other packet types.
+  static uint32_t logKeyOf(const mesh::Packet* packet) {
+    uint8_t type = packet->getPayloadType();
+    const uint8_t* key = nullptr;
+    if (type == PAYLOAD_TYPE_ADVERT && packet->payload_len >= PUB_KEY_SIZE) {
+      key = packet->payload;
+    } else if (type == PAYLOAD_TYPE_ANON_REQ && packet->payload_len >= PATH_HASH_SIZE + PUB_KEY_SIZE) {
+      key = &packet->payload[PATH_HASH_SIZE];
+    } else if ((type == PAYLOAD_TYPE_REQ || type == PAYLOAD_TYPE_RESPONSE || type == PAYLOAD_TYPE_TXT_MSG
+                || type == PAYLOAD_TYPE_PATH) && packet->payload_len >= 2 * PATH_HASH_SIZE) {
+      return hashIdOf(packet->payload[PATH_HASH_SIZE], packet);
+    }
+    if (key == nullptr) return 0;
+    return ((uint32_t)key[0] << 24) | ((uint32_t)key[1] << 16) | ((uint32_t)key[2] << 8) | (uint32_t)key[3];
+  }
+
   bool isOverLimit(const mesh::Packet* packet, int rule, uint64_t uptime_millis, uint32_t limit_recovery,
                    uint8_t limit_burst) {
     uint8_t type = packet->getPayloadType();

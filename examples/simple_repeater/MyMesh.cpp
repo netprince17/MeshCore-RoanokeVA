@@ -1400,7 +1400,11 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       if (isSerialConsole(command, sender_timestamp, "fw show<p>", reply)) firewall.printCounts(Serial, _prefs.firewall_enabled);
     } else if (strcmp(command, "fw senders") == 0 && sender_timestamp == 0) {
       firewall.printSenders(Serial, uptime_millis);
-    } else {   // remote 'fw senders' gets its error from handleCommand()
+#if FIREWALL_LOG_ENABLED
+    } else if (sender_timestamp == 0 && firewall.printLog(Serial, &command[2], uptime_millis)) {
+      // 'fw log' / 'fw log <n>' / 'fw log -': printed
+#endif
+    } else {   // remote 'fw senders' / 'fw log' get their errors from handleCommand()
       firewall.handleCommand(&command[2], reply, _prefs.firewall_enabled, uptime_millis);
     }
   } else if (isTableCommand(command, "routepol")) {

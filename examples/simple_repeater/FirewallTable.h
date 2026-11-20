@@ -11,6 +11,19 @@
 #include "TableFile.h"
 #include "TableCli.h"
 
+// The log of recently dropped packets ('fw log'), left out on STM32 (STM32WL has 64 KB RAM)
+#if !defined(STM32_PLATFORM)
+  #define FIREWALL_LOG_ENABLED  1
+  #include "FirewallLog.h"
+  // 'fw log' filters (parseLogFilter()): FIREWALL_LOG_FILTER_ALL, a rule slot, or FIREWALL_LOG_NO_RULE
+  #define FIREWALL_LOG_FILTER_ALL     -1
+  #define FIREWALL_LOG_FILTER_BAD     -2    // not a filter
+  #define FIREWALL_LOG_FILTER_EMPTY   -3    // an empty slot
+  #define FIREWALL_LOG_REPLY_MAX      159   // longest 'fw log<p>' reply (the reply buffer holds 160 with the NUL)
+#else
+  #define FIREWALL_LOG_ENABLED  0
+#endif
+
 // Firewall rules: decide which received flood packets are forwarded (MyMesh::allowPacketForward()).
 // Loaded at boot from FIREWALL_FILE, or FIREWALL_DEFAULT_RULES if nothing is saved.
 
@@ -53,7 +66,11 @@
 // rule field keys, in format() order, each followed by a space
 #define FIREWALL_FIELD_KEYS    "nm pt hp rb rt ch rg lb lr ls tl ac "
 // 'cmds fw' (one reply): x[p] = x<p> a page, plain x serial console only; * = serial console only
-#define FIREWALL_HELP  "fw [<n> [-] [k:v|k]]|show[p]|counts*|senders[p]|insert <n>|collapse <n>|clear|setdefault|save|reload|unsave; set fw.enabled 0|1"
+#if FIREWALL_LOG_ENABLED
+  #define FIREWALL_HELP  "fw [<n> [-] [k:v|k]]|show[p]|counts*|senders[p]|log[p] [n|-]|log csv*|log clear|insert <n>|collapse <n>|clear|setdefault|save|reload|unsave; set fw.enabled 0|1"
+#else
+  #define FIREWALL_HELP  "fw [<n> [-] [k:v|k]]|show[p]|counts*|senders[p]|insert <n>|collapse <n>|clear|setdefault|save|reload|unsave; set fw.enabled 0|1"
+#endif
 
 // Default rules (loadDefaults(), when none are saved, or 'fw setdefault'): set() configs, into slots 0, 1, 2...
 // "" leaves its slot empty; nullptr ends the list.
@@ -134,6 +151,13 @@ struct FirewallRule {
 };
 static_assert(sizeof(FirewallRule) == 32, "firewall rule must stay 32 bytes");
 static_assert(FIREWALL_MAX_RULES <= 256, "sender tracking keeps rule slots in 8 bits");
+#if FIREWALL_LOG_ENABLED
+static_assert(FIREWALL_MAX_RULES < FIREWALL_LOG_OLD_RULE, "the firewall log keeps rule slots in 8 bits");
+static_assert(FIREWALL_LOG_TABLE_ROUTEPOL == FIREWALL_LOOKUP_ROUTE_POLICY && FIREWALL_LOG_TABLE_HOPPOL == FIREWALL_LOOKUP_HOP_POLICY
+              && FIREWALL_LOG_TABLE_SENDTRK == FIREWALL_LOOKUP_SENDER_TRACKING
+              && FIREWALL_LOG_TABLE_CHANTRK == FIREWALL_LOOKUP_CHANNEL_TRACKING
+              && FIREWALL_LOG_TABLE_PKTTRK == FIREWALL_LOOKUP_PACKET_TRACKING, "firewall log tables must match tl:");
+#endif
 
 class FirewallTable : private TableCli {
   FirewallRule _rules[FIREWALL_MAX_RULES];   // rules in slot order, empty slots (param_set 0) anywhere
@@ -142,7 +166,10 @@ class FirewallTable : private TableCli {
   PacketTracking<PACKET_TRACKING_SLOTS> _packets;   // numbered allowances, for rules with FIREWALL_LOOKUP_PACKET_TRACKING
   RoutePolicy _route_policy;                 // repeater routes, for rules with FIREWALL_LOOKUP_ROUTE_POLICY
   HopPolicy _hop_policy;                     // hop limits per packet property, for rules with FIREWALL_LOOKUP_HOP_POLICY
-  FILESYSTEM* _fs;                           // where the rules are saved, set by begin()
+#if FIREWALL_LOG_ENABLED
+  FirewallLog _log;                          // recently dropped packets ('fw log')
+#endif
+  FILESYSTEM* _fs;                          // where the rules are saved, set by begin()
   RegionMap* _regions;                       // the region list, for rg names (rules keep region ids), set by begin()
   bool _unknown_region;                      // set by parseRegion(): the last rg name isn't in the region list
   int _skipped;                              // rules skipped by the last load() (unknown region)
@@ -300,30 +327,48 @@ public:
       // the rule acts.
       int route_slot = -1;   // route policy slot that matched
       int hop_entry = -1;    // hop policy entry that matched
+      uint8_t log_table = FIREWALL_LOOKUP_NONE;   // the table, and its key for the packet, for the firewall log
+      uint32_t log_key = 0;
       if (r->param_set & FIREWALL_HAS_TABLE_LOOKUP) {
         if (r->table_lookup == FIREWALL_LOOKUP_ROUTE_POLICY) {         // the path matches one of its routes
           route_slot = _route_policy.findMatch(packet->path, packet->getPathHashSize(), packet->getPathHashCount());
           if (route_slot < 0) continue;
+          log_key = route_slot;
         } else if (r->table_lookup == FIREWALL_LOOKUP_HOP_POLICY) {    // over a hop limit that applies to it
           hop_entry = _hop_policy.findMatch(packet, hop_count);
           if (hop_entry < 0) continue;
+          log_key = hop_entry;
         } else if (r->table_lookup == FIREWALL_LOOKUP_SENDER_TRACKING) {   // sender over lb / lr (this rule's clock)
           if (!_senders.isOverLimit(packet, i, uptime_millis, r->limit_recovery, r->limit_burst)) continue;
+          log_key = SenderTracking::logKeyOf(packet);
         } else if (r->table_lookup == FIREWALL_LOOKUP_CHANNEL_TRACKING) {  // channel over lb / lr
           if (!_channels.isOverLimit(packet, uptime_millis, r->limit_recovery, r->limit_burst)) continue;
+          log_key = packet->payload[0];   // the channel hash (isOverLimit() only matches channel messages)
         } else if (r->table_lookup == FIREWALL_LOOKUP_PACKET_TRACKING) {   // slot ls over lb / lr
           if (!_packets.isOverLimit(r->limit_slot, uptime_millis, r->limit_recovery, r->limit_burst)) continue;
+          log_key = r->limit_slot;
         } else {
           continue;   // unknown table
         }
+        log_table = r->table_lookup;
       }
 
       // all used checks passed: this rule decides, using its action
       r->match_count++;
       if (route_slot >= 0) _route_policy.addMatch(route_slot);
       if (hop_entry >= 0) _hop_policy.addMatch(hop_entry);
+#if FIREWALL_LOG_ENABLED
+      if (r->action != FIREWALL_ACTION_FORWARD) {
+        _log.add(uptime_millis, i, packet_type, packet->getRouteType(), packet->getPathHashSize(), hop_count,
+                 log_table, log_key);
+      }
+#endif
       return r->action == FIREWALL_ACTION_FORWARD;
     }
+#if FIREWALL_LOG_ENABLED
+    _log.add(uptime_millis, FIREWALL_LOG_NO_RULE, packet_type, packet->getRouteType(), packet->getPathHashSize(),
+             hop_count, FIREWALL_LOOKUP_NONE, 0);
+#endif
     return false;   // no rule decided: drop
   }
 
@@ -502,6 +547,9 @@ public:
       if (any_field) return "rule needs a match or check field";   // eg. only nm / ac
       _rules[number] = FirewallRule();   // empty config: empty slot
       _senders.forgetRule(number);
+#if FIREWALL_LOG_ENABLED
+      _log.forgetRule(number);           // its log entries are kept, as from an old rule
+#endif
       return nullptr;
     }
     if (from_empty && !has_action) return "ac needed, drop or fwd";
@@ -530,6 +578,9 @@ public:
     if (reset) {   // a new rule: its sender clocks start over (field edits keep them)
       r.match_count = 0;
       _senders.forgetRule(number);
+#if FIREWALL_LOG_ENABLED
+      _log.forgetRule(number);   // the old rule's log entries aren't the new rule's drops
+#endif
     }
     _rules[number] = r;
     return nullptr;
@@ -545,10 +596,13 @@ public:
     }
   }
 
-  // empties every slot (and forgets every sender clock)
+  // empties every slot (and forgets every sender clock, and empties the firewall log)
   void clear() {
     for (int i = 0; i < FIREWALL_MAX_RULES; i++) _rules[i] = FirewallRule();
     _senders.clear();
+#if FIREWALL_LOG_ENABLED
+    _log.clear();
+#endif
   }
 
   // number of slots holding a rule
@@ -757,6 +811,78 @@ public:
     out.print(line);
   }
 
+#if FIREWALL_LOG_ENABLED
+  // 'fw log' / 'fw log <n>' / 'fw log -' for the serial console: too long for one reply. 'command' is the text
+  // after "fw". Prints the count since boot and the entries logged, then every logged drop (of rule n, or with no
+  // rule matched), newest first:
+  //   age, rule (slot and name, "- (none)": no rule matched, "- (old)": a rule since replaced), payload type,
+  //   route type, hop count, the key of the rule's table ("pre a1b2c3d4", "src 3a via 9e", "ch 5e", "ls 0",
+  //   "route 2 (north)", "hop req")
+  // A filtered log leaves out the rule column. 'fw log csv [<n>|-]': the same drops as CSV (printLogCsv()).
+  // Returns false (nothing printed) if 'command' isn't one of these, for handleCommand() to reply to.
+  bool printLog(Print& out, const char* command, uint64_t uptime_millis) {
+    while (*command == ' ') command++;
+    if (memcmp(command, "log", 3) != 0 || (command[3] != 0 && command[3] != ' ')) return false;
+    const char* p = &command[3];
+    while (*p == ' ') p++;
+    if (strcmp(p, "clear") == 0) return false;
+    bool csv = isCommand(p, "csv");
+    if (csv) p += 3;
+    int filter = parseLogFilter(p);
+    if (filter < FIREWALL_LOG_FILTER_ALL) return false;
+    if (csv) {
+      printLogCsv(out, filter, uptime_millis);
+      return true;
+    }
+
+    char line[96];
+    int logged = 0;
+    for (int age = 0; age < _log.getCount(); age++) {
+      if (logMatches(_log.getEntry(age), filter)) logged++;
+    }
+    int n = formatLogTotal(filter, line);
+    sprintf(&line[n], " since boot, %d logged\n", logged);
+    out.print(line);
+    if (logged == 0) return true;
+    if (filter == FIREWALL_LOG_FILTER_ALL) {
+      sprintf(line, "%-5s %-12s %-8s %-7s %4s  %s\n", "# age", "rule", "type", "route", "hops", "key");
+    } else {
+      sprintf(line, "%-5s %-8s %-7s %4s  %s\n", "# age", "type", "route", "hops", "key");
+    }
+    out.print(line);
+
+    for (int age = 0; age < _log.getCount(); age++) {
+      const FirewallLogEntry* e = _log.getEntry(age);
+      if (!logMatches(e, filter)) continue;
+      char when[8], type[8], key[32];
+      FirewallLog::formatAge(e->uptime_secs, uptime_millis, when);
+      formatLogType(e, type);
+      FirewallLog::formatKey(e, true, _route_policy, key);
+      const char* route = routeTypeName(e->routeType());
+      if (filter == FIREWALL_LOG_FILTER_ALL) {
+        char slot[4];
+        const char* name;
+        if (e->rule == FIREWALL_LOG_NO_RULE) {
+          strcpy(slot, "-");
+          name = "(none)";
+        } else if (e->rule == FIREWALL_LOG_OLD_RULE) {
+          strcpy(slot, "-");
+          name = "(old)";
+        } else {
+          sprintf(slot, "%d", e->rule);
+          const FirewallRule* r = getRule(e->rule);
+          name = (r != nullptr && r->name[0] != 0) ? r->name : "?";
+        }
+        sprintf(line, "%5s %2s %-9s %-8s %-7s %4d  %s\n", when, slot, name, type, route, e->hops, key);
+      } else {
+        sprintf(line, "%5s %-8s %-7s %4d  %s\n", when, type, route, e->hops, key);
+      }
+      out.print(line);
+    }
+    return true;
+  }
+#endif
+
   // CLI 'fw' ('command' is the text after "fw"). Replies, except show pages, can be pasted back as commands.
   // 'enabled': the fw.enabled setting, shown by the slot list and show pages.
   //   fw                     slots in use, eg. "0,1,2" (then " (firewall off)" if it's off)
@@ -774,6 +900,13 @@ public:
   //   fw senders<p>          page p of the sender tracking table (tl:sendtrk): senders still tracked (limits in
   //                          effect), then "slot name tracked/maxed (dropped)" per sendtrk rule, maxed: senders whose
   //                          next packet would be dropped, dropped: the rule's match count. 'uptime_millis': now.
+  //   fw log [<n>|-]         the firewall log, serial console only: handled by MyMesh (printLog())
+  //   fw log<p> [<n>|-]      page p of FIREWALL_LOG_PAGE_ENTRIES logged drops, newest first (of rule n, or with no
+  //                          rule matched): "drops: <since boot>" (or "rule <n> <name>: <its drops> drops", "no
+  //                          rule: <n> drops"), then "<age> <slot> <type> <hops> <key>" lines (no slot when
+  //                          filtered), the key without its label (see formatLogPage())
+  //   fw log csv [<n>|-]     the firewall log as CSV, serial console only: handled by MyMesh (printLogCsv())
+  //   fw log clear           empties the log (the counts since boot stay)
   void handleCommand(const char* command, char* reply, bool enabled, uint64_t uptime_millis) {
     while (*command == ' ') command++;
 
@@ -848,6 +981,13 @@ public:
       }
       formatSenders(page, uptime_millis, reply);
 
+    } else if (memcmp(command, "log", 3) == 0) {   // the firewall log: recently dropped packets
+#if FIREWALL_LOG_ENABLED
+      handleLogCommand(&command[3], reply, uptime_millis);
+#else
+      strcpy(reply, "Err - no firewall log in this build");
+#endif
+
     } else if (strcmp(command, "unsave") == 0) {   // remove the saved rules, so the defaults load at boot
       if (_fs == nullptr || !_fs->exists(FIREWALL_FILE)) {
         strcpy(reply, "OK - nothing saved");
@@ -904,7 +1044,7 @@ public:
       const char* p = command;
       int number = parseSlotNumber(p);
       if (number < 0 || number >= FIREWALL_MAX_RULES) {
-        sprintf(reply, "Err - use: fw [<0-%d> [-] [key:value|key ...]]|show<p>|insert <n>|collapse <n>|clear|setdefault|save|reload|unsave|senders<p>",
+        sprintf(reply, "Err - use: fw [<0-%d> [-] [key:value|key ...]]|show<p>|insert <n>|collapse <n>|clear|setdefault|save|reload|unsave|senders<p>|log<p>",
                 FIREWALL_MAX_RULES - 1);
         return;
       }
@@ -1104,6 +1244,177 @@ private:
     if (later) strcpy(&reply[n], "\n...");
   }
 
+#if FIREWALL_LOG_ENABLED
+  // The filter at 'p' (the rest of the command): "" all drops, "<n>" rule n's, "-" drops with no rule matched.
+  int parseLogFilter(const char* p) const {
+    while (*p == ' ') p++;
+    if (*p == 0) return FIREWALL_LOG_FILTER_ALL;
+    if (p[0] == '-' && p[1] == 0) return FIREWALL_LOG_NO_RULE;
+    int number = parseSlotNumber(p);
+    if (number < 0 || number >= FIREWALL_MAX_RULES || *p != 0) return FIREWALL_LOG_FILTER_BAD;
+    if (getRule(number) == nullptr) return FIREWALL_LOG_FILTER_EMPTY;
+    return number;
+  }
+
+  static bool logMatches(const FirewallLogEntry* e, int filter) {
+    return filter == FIREWALL_LOG_FILTER_ALL || e->rule == filter;
+  }
+
+  // Writes the since-boot count for 'filter': "drops: <n>", "rule <n> <name>: <its drops> drops" (its match count),
+  // or "no rule: <n> drops". Returns the length.
+  int formatLogTotal(int filter, char* dest) const {
+    if (filter == FIREWALL_LOG_FILTER_ALL) return sprintf(dest, "drops: %lu", (unsigned long)_log.getTotal());
+    if (filter == FIREWALL_LOG_NO_RULE) return sprintf(dest, "no rule: %lu drops", (unsigned long)_log.getNoRuleTotal());
+    const FirewallRule* r = getRule(filter);
+    const char* name = (r != nullptr && r->name[0] != 0) ? r->name : "?";
+    return sprintf(dest, "rule %d %s: %lu drops", filter, name, r != nullptr ? (unsigned long)r->match_count : 0UL);
+  }
+
+  // Writes an entry's payload type name (its number if it has none). Returns the length.
+  static int formatLogType(const FirewallLogEntry* e, char* dest) {
+    const char* name = packetTypeName(e->payloadType());
+    if (name[0] != 0) return sprintf(dest, "%s", name);
+    return sprintf(dest, "%d", e->payloadType());
+  }
+
+  // 'fw log...' ('p' is the text after "log"): a page, 'clear', or the serial console only error.
+  void handleLogCommand(const char* p, char* reply, uint64_t uptime_millis) {
+    static const char* usage = "Err - use: fw log<p> [<n>|-] or fw log clear";
+    if (*p == 0) {   // the whole log: serial console only, printed by MyMesh
+      strcpy(reply, "Err - fw log: serial console only, use fw log<p>");
+      return;
+    }
+    if (*p == ' ') {
+      while (*p == ' ') p++;
+      if (strcmp(p, "clear") == 0) {
+        _log.clear();
+        strcpy(reply, "OK - firewall log cleared");
+        return;
+      }
+      if (isCommand(p, "csv")) {   // CSV: serial console only, printed by MyMesh
+        strcpy(reply, "Err - fw log csv: serial console only, use fw log<p>");
+        return;
+      }
+      int filter = parseLogFilter(p);
+      if (filter == FIREWALL_LOG_FILTER_EMPTY) {
+        strcpy(reply, "Err - that slot is empty");
+      } else if (filter < FIREWALL_LOG_FILTER_ALL) {
+        strcpy(reply, usage);
+      } else {   // the whole log of one rule: serial console only, printed by MyMesh
+        strcpy(reply, "Err - fw log <n>: serial console only, use fw log<p> <n>");
+      }
+      return;
+    }
+    int page = parseSlotNumber(p);   // moves past the number and its spaces
+    if (page < 1) {
+      strcpy(reply, usage);
+      return;
+    }
+    int filter = parseLogFilter(p);
+    if (filter == FIREWALL_LOG_FILTER_EMPTY) {
+      strcpy(reply, "Err - that slot is empty");
+      return;
+    }
+    if (filter < FIREWALL_LOG_FILTER_ALL) {
+      strcpy(reply, usage);
+      return;
+    }
+    formatLogPage(page, filter, uptime_millis, reply);
+  }
+
+  // Page 'page' of the logged drops matching 'filter', newest first: the since-boot count (formatLogTotal()),
+  // then FIREWALL_LOG_PAGE_ENTRIES "<age> <slot> <type> <hops> <key>" lines ("-": no rule matched, "old": a rule
+  // since replaced; no slot when filtered), the key without its label ("a1b2c3d4", "3a/9e", "5e", "0", "2",
+  // "req"), then "..." on its own line if a later page has drops. The longest 5 entries fit one reply.
+  void formatLogPage(int page, int filter, uint64_t uptime_millis, char* reply) const {
+    int n = formatLogTotal(filter, reply);
+    int first = (page - 1) * FIREWALL_LOG_PAGE_ENTRIES;   // index of the page's first matching entry
+    int index = 0;
+    int shown = 0;
+    bool later = false;
+    for (int age = 0; age < _log.getCount(); age++) {
+      const FirewallLogEntry* e = _log.getEntry(age);
+      if (!logMatches(e, filter)) continue;
+      if (index++ < first) continue;
+      if (shown == FIREWALL_LOG_PAGE_ENTRIES) {
+        later = true;
+        break;
+      }
+      char item[48];
+      int len = FirewallLog::formatAge(e->uptime_secs, uptime_millis, item);
+      if (filter == FIREWALL_LOG_FILTER_ALL) {
+        if (e->rule == FIREWALL_LOG_NO_RULE) {
+          len += sprintf(&item[len], " -");
+        } else if (e->rule == FIREWALL_LOG_OLD_RULE) {
+          len += sprintf(&item[len], " old");
+        } else {
+          len += sprintf(&item[len], " %d", e->rule);
+        }
+      }
+      item[len++] = ' ';
+      len += formatLogType(e, &item[len]);
+      len += sprintf(&item[len], " %d", e->hops);
+      if (e->table != FIREWALL_LOG_TABLE_NONE) {
+        item[len++] = ' ';
+        len += FirewallLog::formatKey(e, false, _route_policy, &item[len]);
+      }
+      // The longest 5 entries fit with a count of up to 8 digits. Past 100 million drops a page of long entries
+      // can run out of room: it ends early and that entry isn't shown (the next page starts after it).
+      if (n + 1 + len + 4 > FIREWALL_LOG_REPLY_MAX) {
+        later = true;
+        break;
+      }
+      reply[n++] = '\n';
+      memcpy(&reply[n], item, len);
+      n += len;
+      reply[n] = 0;
+      shown++;
+    }
+    if (shown == 0) {
+      if (page == 1) {
+        strcpy(&reply[n], "\nnone logged");
+      } else {
+        sprintf(reply, "Err - no page %d, %d logged", page, index);
+      }
+      return;
+    }
+    if (later) strcpy(&reply[n], "\n...");
+  }
+
+  // 'fw log csv': the logged drops matching 'filter' as CSV, newest first, one line each:
+  //   age_s,uptime_s,rule,name,type,route,hops,table,key
+  // age_s: seconds ago ('stats csv' min_ago x 60), uptime_s: the repeater's uptime when dropped, rule: the
+  // slot, or "-" (name "(none)": no rule matched, "(old)": a rule since replaced), table: the tl name, key: the
+  // table's key without its label (as the pages: "a1b2c3d4", "3a/9e", "5e", "0", "2", "req"), empty without one.
+  void printLogCsv(Print& out, int filter, uint64_t uptime_millis) const {
+    out.print("age_s,uptime_s,rule,name,type,route,hops,table,key\n");
+    uint32_t now = (uint32_t)(uptime_millis / 1000);
+    for (int age = 0; age < _log.getCount(); age++) {
+      const FirewallLogEntry* e = _log.getEntry(age);
+      if (!logMatches(e, filter)) continue;
+      char slot[4], type[8], key[32], line[96];
+      const char* name;
+      if (e->rule == FIREWALL_LOG_NO_RULE) {
+        strcpy(slot, "-");
+        name = "(none)";
+      } else if (e->rule == FIREWALL_LOG_OLD_RULE) {
+        strcpy(slot, "-");
+        name = "(old)";
+      } else {
+        sprintf(slot, "%d", e->rule);
+        const FirewallRule* r = getRule(e->rule);
+        name = (r != nullptr && r->name[0] != 0) ? r->name : "";
+      }
+      formatLogType(e, type);
+      FirewallLog::formatKey(e, false, _route_policy, key);
+      uint32_t ago = now >= e->uptime_secs ? now - e->uptime_secs : 0;
+      sprintf(line, "%lu,%lu,%s,%s,%s,%s,%d,%s,%s\n", (unsigned long)ago, (unsigned long)e->uptime_secs, slot, name,
+              type, routeTypeName(e->routeType()), e->hops, tableLookupName(e->table), key);
+      out.print(line);
+    }
+  }
+#endif
+
   // 'fw insert <n>': moves rules number.. down one, up to the first empty slot.
   void insertSlot(int number, char* reply) {
     int free_slot = -1;   // first empty slot from 'number' on
@@ -1125,6 +1436,10 @@ private:
     _rules[number] = FirewallRule();
     _senders.forgetRule(free_slot);                  // left over from an old rule there, if any
     _senders.moveRules(number, free_slot - 1, 1);   // sender clocks move with their rules
+#if FIREWALL_LOG_ENABLED
+    _log.forgetRule(free_slot);                      // as the sender clocks
+    _log.moveRules(number, free_slot - 1, 1);
+#endif
     sprintf(reply, "OK - slot %d opened", number);
   }
 
@@ -1146,6 +1461,10 @@ private:
     _rules[FIREWALL_MAX_RULES - 1] = FirewallRule();
     _senders.forgetRule(number);                                // left over from an old rule there, if any
     _senders.moveRules(number + 1, FIREWALL_MAX_RULES - 1, -1);   // sender clocks move with their rules
+#if FIREWALL_LOG_ENABLED
+    _log.forgetRule(number);                                    // as the sender clocks
+    _log.moveRules(number + 1, FIREWALL_MAX_RULES - 1, -1);
+#endif
     sprintf(reply, "OK - slot %d removed", number);
   }
 
